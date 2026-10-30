@@ -62,8 +62,8 @@ struct SearchResult: Identifiable, Hashable {
 /// 章节正文不入库（单独存文件），避免书架 JSON 膨胀。
 struct Chapter: Codable, Identifiable, Hashable {
     var id: UUID = UUID()
-    var index: Int
-    var title: String
+    var index: Int = 0
+    var title: String = ""
     var url: String = ""
     var cached: Bool = false
     var wordCount: Int = 0
@@ -122,9 +122,9 @@ struct BookGroup: Codable, Identifiable, Hashable {
 
 struct Bookmark: Codable, Identifiable, Hashable {
     var id: UUID = UUID()
-    var bookID: UUID
-    var chapterIndex: Int
-    var chapterTitle: String
+    var bookID: UUID = UUID()
+    var chapterIndex: Int = 0
+    var chapterTitle: String = ""
     var page: Int = 0
     var text: String = ""
     var createdAt: Date = Date()
