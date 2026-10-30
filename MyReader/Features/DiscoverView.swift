@@ -10,9 +10,15 @@ struct DiscoverView: View {
     @State private var addedMessage: String?
     @State private var showSourceList = false
 
-    private var grouped: [(source: String, items: [SearchResult])] {
+    private struct SourceSection: Identifiable {
+        let id: String
+        let source: String
+        let items: [SearchResult]
+    }
+
+    private var grouped: [SourceSection] {
         let dict = Dictionary(grouping: results, by: { $0.sourceName })
-        return dict.map { (source: $0.key, items: $0.value) }
+        return dict.map { SourceSection(id: $0.key, source: $0.key, items: $0.value) }
             .sorted { $0.items.count > $1.items.count }
     }
 
@@ -32,7 +38,7 @@ struct DiscoverView: View {
                     emptyState
                 } else {
                     List {
-                        ForEach(grouped, id: \.source) { section in
+                        ForEach(grouped) { section in
                             Section(header: Text("\(section.source) · \(section.items.count) 条")) {
                                 ForEach(section.items) { item in
                                     Button {
