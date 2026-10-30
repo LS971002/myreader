@@ -7,21 +7,35 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    # 用 Xcode 16 的运行器：XcodeGen 现在默认产出 objectVersion 77 的工程格式，
+    # Xcode 15.x 打不开。macos-15 自带 Xcode 16，可以直接读。
+    runs-on: macos-15
     timeout-minutes: 40
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show Xcode version
-        run: xcodebuild -version
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
 
       - name: Install XcodeGen
         run: brew install xcodegen
 
       - name: Generate Xcode project
-        run: xcodegen generate
+        run: |
+          xcodegen generate
+          # 双保险：把工程格式降回 60（Xcode 15 可读），
+          # 这样即使运行器的 Xcode 版本变化也不会再出现 "future project file format"。
+          sed -i '' 's/objectVersion = 77;/objectVersion = 60;/g' MyReader.xcodeproj/project.pbxproj || true
+          grep -m1 objectVersion MyReader.xcodeproj/project.pbxproj || true
 
       - name: Build (no code signing)
         run: |
@@ -36,7 +50,7 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            archive
+            archive 2>&1 | tee build.log
 
       - name: Package Payload into IPA
         run: |
@@ -52,3 +66,11 @@ jobs:
           name: MyReader-unsigned-ipa
           path: build/MyReader-unsigned.ipa
           if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
