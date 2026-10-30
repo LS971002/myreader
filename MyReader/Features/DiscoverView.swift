@@ -75,8 +75,8 @@ struct DiscoverView: View {
                     .environmentObject(store)
             }
             .overlay(alignment: .bottom) {
-                if let addedMessage {
-                    Text(addedMessage)
+                if let message = addedMessage {
+                    Text(message)
                         .font(.footnote)
                         .padding(.horizontal, 14).padding(.vertical, 9)
                         .background(.thinMaterial, in: Capsule())

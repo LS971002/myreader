@@ -257,7 +257,7 @@ final class TTSController: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         super.init()
         synthesizer.delegate = self
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio,
-                                                         options: [.duckOthers, .allowBluetooth])
+                                                         options: [.duckOthers, .allowBluetoothHFP])
         try? AVAudioSession.sharedInstance().setActive(true)
     }
 
