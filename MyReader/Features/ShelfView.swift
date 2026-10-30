@@ -39,11 +39,9 @@ struct ShelfView: View {
                     ScrollView {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 18)], spacing: 22) {
                             ForEach(books) { book in
-                                NavigationLink {
-                                    ReaderView(book: book, store: store)
-                                        .environmentObject(store)
-                                        .environmentObject(theme)
-                                } label: {
+                                NavigationLink(destination: ReaderView(book: book, store: store)
+                                    .environmentObject(store)
+                                    .environmentObject(theme)) {
                                     BookCell(book: book)
                                 }
                                 .buttonStyle(.plain)

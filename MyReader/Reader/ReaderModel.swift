@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import Combine
 
 final class ReaderModel: ObservableObject {
     let store: Store

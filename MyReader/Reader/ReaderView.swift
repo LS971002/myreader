@@ -97,7 +97,7 @@ struct ReaderView: View {
             .onChange(of: settings.fontSize) { _ in model.reloadPagination() }
             .onChange(of: settings.lineSpacing) { _ in model.reloadPagination() }
             .onChange(of: settings.fontName) { _ in model.reloadPagination() }
-            .statusBarHidden(!settings.showStatusBar && settings.fullScreen)
+            .statusBar(hidden: !settings.showStatusBar && settings.fullScreen)
         }
         .navigationBarHidden(true)
         .sheet(isPresented: $showCatalog) {
@@ -107,6 +107,11 @@ struct ReaderView: View {
         }
         .sheet(isPresented: $showSettings) {
             ReaderSettingsPanel(model: model)
+                .environmentObject(store)
+                .environmentObject(theme)
+        }
+        .sheet(isPresented: $showTTS) {
+            TTSBar(model: model)
                 .environmentObject(store)
                 .environmentObject(theme)
         }
@@ -196,9 +201,6 @@ struct ReaderView: View {
             }
             .padding(.vertical, 10)
             .background(.regularMaterial)
-            .sheet(isPresented: $showTTS) {
-                TTSBar(model: model).environmentObject(store)
-            }
         }
         .foregroundStyle(Color.primary)
         .ignoresSafeArea(edges: .bottom)

@@ -54,7 +54,7 @@ struct Selector {
         var result: [HTMLNode] = []
         var seen = Set<ObjectIdentifier>()
         for group in groups {
-            guard let last = group.last else { continue }
+            guard group.last != nil else { continue }
             for node in all where node !== root {
                 guard matchesChain(node: node, steps: group, index: group.count - 1) else { continue }
                 if seen.insert(ObjectIdentifier(node)).inserted {

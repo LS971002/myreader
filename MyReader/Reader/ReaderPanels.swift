@@ -16,7 +16,7 @@ struct CatalogSheet: View {
         let filtered = query.isEmpty
             ? all
             : all.filter { $0.title.localizedCaseInsensitiveContains(query) }
-        return ascending ? filtered : filtered.reversed()
+        return ascending ? filtered : Array(filtered.reversed())
     }
 
     var body: some View {
@@ -97,7 +97,7 @@ struct ReaderSettingsPanel: View {
                 }
             }
         }
-        .presentationDetents([.medium, .large])
+        .compatibleDetents(.mediumSheet)
     }
 
     private var typographyTab: some View {
@@ -354,7 +354,7 @@ struct TTSBar: View {
             Toggle("读完自动翻页 / 下一章", isOn: $autoNext)
         }
         .padding(20)
-        .presentationDetents([.height(380)])
+        .compatibleDetents(.bar)
         .onAppear {
             currentPage = model.pageIndex
             tts.onFinish = {
@@ -381,5 +381,29 @@ struct TTSBar: View {
                   rate: store.settings.ttsRate,
                   pitch: store.settings.ttsPitch,
                   voiceIdentifier: store.settings.ttsVoice)
+    }
+}
+
+// MARK: - iOS 15 兼容的 sheet 高度
+
+enum CompatibleDetent {
+    case mediumSheet
+    case bar
+}
+
+extension View {
+    /// `.presentationDetents` 是 iOS 16+，iOS 15 上退化为默认高度。
+    @ViewBuilder
+    func compatibleDetents(_ style: CompatibleDetent) -> some View {
+        if #available(iOS 16.0, *) {
+            switch style {
+            case .mediumSheet:
+                self.presentationDetents([.medium, .large])
+            case .bar:
+                self.presentationDetents([.height(380)])
+            }
+        } else {
+            self
+        }
     }
 }

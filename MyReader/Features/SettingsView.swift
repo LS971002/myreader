@@ -15,9 +15,7 @@ struct SettingsView: View {
         NavigationView {
             List {
                 Section {
-                    NavigationLink {
-                        ThemeSettingsView()
-                    } label: {
+                    NavigationLink(destination: ThemeSettingsView()) {
                         Label("阅读主题与排版", systemImage: "textformat")
                     }
                     Button {

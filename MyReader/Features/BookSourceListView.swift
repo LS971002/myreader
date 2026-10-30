@@ -172,7 +172,7 @@ struct BookSourceEditor: View {
                         store.upsertSources([draft])
                         dismiss()
                     }
-                    .bold()
+                    .font(.body.weight(.semibold))
                 }
             }
         }
