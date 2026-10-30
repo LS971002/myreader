@@ -24,7 +24,7 @@ final class Store: ObservableObject {
         books = loadArray(Book.self, elementDefault: Book(), at: Paths.booksJSON)
         sources = loadArray(BookSource.self, elementDefault: BookSource(), at: Paths.sourcesJSON)
         groups = loadArray(BookGroup.self, elementDefault: BookGroup(), at: Paths.groupsJSON)
-        bookmarks = loadArray(Bookmark.self, elementDefault: Bookmark(bookID: UUID()), at: Paths.bookmarksJSON)
+        bookmarks = loadArray(Bookmark.self, elementDefault: Bookmark(), at: Paths.bookmarksJSON)
 
         if let data = try? Data(contentsOf: Paths.settingsJSON),
            let settings = LenientJSON.decode(AppSettings.self, from: data, default: AppSettings()) {
