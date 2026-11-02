@@ -441,6 +441,12 @@ struct AppSettings: Codable, Hashable {
     var ttsRatePercent: Double = 50        // 0~100
     var ttsPitchPercent: Double = 75       // 0~100（默认 1.0）
     var ttsVoice: String = ""
+    /// 混合音频（true=不打断其他App声音；false=独占，支持锁屏/控制中心遥控）
+    var ttsMixAudio: Bool = false
+    /// 本地听书分段字符数（对齐源APP「本地听书分段字符数」）
+    var ttsSegmentChars: Int = 500
+    /// 朗读读完自动接续下一章
+    var ttsAutoNext: Bool = true
 
     var ttsRate: Float { Float(max(0, min(1, ttsRatePercent / 100))) }
     var ttsPitch: Float {

@@ -13,6 +13,7 @@ struct ReaderView: View {
     @State private var showTTS = false
     @State private var dragOffset: CGFloat = 0
     @State private var isTurning = false            // 翻页动画进行中（防重入）
+    @State private var zombieGesture = false        // 动画期间开始的手势会话 → 整段作废
 
     init(book: Book, store: Store) {
         _model = StateObject(wrappedValue: ReaderModel(store: store, book: book))
@@ -71,17 +72,29 @@ struct ReaderView: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        guard settings.pageTurn != .scroll, !isTurning else { return }
+                        guard settings.pageTurn != .scroll else { return }
+                        // 动画期间开始的手势会话：整段作废（防止解锁后残留位移多翻一页）
+                        if isTurning {
+                            zombieGesture = true
+                            return
+                        }
                         dragOffset = max(-pageWidth, min(pageWidth, value.translation.width))
                     }
                     .onEnded { value in
-                        guard settings.pageTurn != .scroll, !isTurning else { return }
-                        let dx = dragOffset
+                        guard settings.pageTurn != .scroll else { return }
+                        if zombieGesture {
+                            zombieGesture = false
+                            return
+                        }
+                        guard !isTurning else { return }
+                        // 用本会话自身位移判定（不用 dragOffset 残留）
+                        let dx = value.translation.width
                         if abs(dx) < 12, abs(value.translation.height) < 12 {
                             handleTap(x: value.location.x, width: geo.size.width)
                             dragOffset = 0
                             return
                         }
+                        dragOffset = max(-pageWidth, min(pageWidth, dx))
                         // 速度加成：快速轻扫也翻页
                         let velocity = value.predictedEndTranslation.width - value.translation.width
                         let shouldTurn = dx < -pageWidth * 0.32 || velocity < -pageWidth * 0.6

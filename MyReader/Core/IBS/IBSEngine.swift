@@ -242,6 +242,11 @@ final class IBSEngine {
                 text = decodeDataURL(url)
                 headers = [:]
             } else {
+                // 相对路径绝对化（对齐爱阅：基于父请求URL，无父则书源主页）
+                // 码字阅读等 @dyn: 源的 url 求值产物就是 "/search/" 这类相对路径
+                let baseURL = parentFrames.first?.currentRequestUrl ?? source.homeURL
+                let absoluteURL = HTTPClient.absolute(url, base: baseURL)
+
                 // 3. 请求（含重试）
                 let method = node.forGetMethod ? "GET" : "POST"
                 let params = applyParamsDict(node.params, keyword: keyword)
@@ -259,11 +264,11 @@ final class IBSEngine {
                     do {
                         if node.requestByWebView {
                             let html = try await WebViewFetcher.shared.fetch(
-                                url: url, headers: mergedHeaders, js: nil)
-                            resp = HTTPClient.Response(finalURL: url, text: html, headers: [:])
+                                url: absoluteURL, headers: mergedHeaders, js: nil)
+                            resp = HTTPClient.Response(finalURL: absoluteURL, text: html, headers: [:])
                         } else {
                             resp = try await HTTPClient.shared.request(
-                                url: url, method: method, params: params,
+                                url: absoluteURL, method: method, params: params,
                                 staticHeaders: staticHeaders,
                                 dynamicHeaders: ctx.headers, useCookies: useCookies)
                         }
@@ -277,7 +282,9 @@ final class IBSEngine {
                 if let resp {
                     text = resp.text
                     headers = resp.headers
-                    finalURL = resp.finalURL
+                    finalURL = resp.finalURL.isEmpty ? absoluteURL : resp.finalURL
+                } else {
+                    finalURL = absoluteURL
                 }
             }
         }

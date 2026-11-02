@@ -109,8 +109,13 @@ struct DiscoverView: View {
                 Button("去添加书源") { showSourceList = true }
                     .buttonStyle(.bordered)
             } else if !manager.failures.isEmpty {
-                Text("未响应：\(manager.failures.joined(separator: "、"))")
-                    .font(.caption2).foregroundStyle(.orange)
+                VStack(spacing: 4) {
+                    Text("部分书源未响应：")
+                        .font(.caption2).foregroundStyle(.orange)
+                    ForEach(manager.failures.prefix(3), id: \.self) { entry in
+                        Text(entry).font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -157,8 +162,9 @@ struct DiscoverView: View {
             }
             if !manager.failures.isEmpty {
                 Section(header: Text("未响应的书源")) {
-                    Text(manager.failures.joined(separator: "、"))
-                        .font(.caption2).foregroundStyle(.secondary)
+                    ForEach(manager.failures, id: \.self) { entry in
+                        Text(entry).font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
             }
         }

@@ -36,7 +36,7 @@ final class SearchManager: ObservableObject {
             var failed: [String] = []
             let sourceList = sources.sorted { $0.weight > $1.weight }
 
-            await withTaskGroup(of: (String, [SearchResult]?)?.self) { group in
+            await withTaskGroup(of: (String, [SearchResult]?, String?)?.self) { group in
                 var iterator = sourceList.makeIterator()
                 let window = min(max(concurrency, 1), sourceList.count)
 
@@ -49,11 +49,11 @@ final class SearchManager: ObservableObject {
                                 try Task.checkCancellation()
                                 let engine = IBSEngine(source: source)
                                 let results = try await engine.search(keyword: trimmed)
-                                return (name, results)
+                                return (name, results, nil)
                             } catch is CancellationError {
                                 return nil
                             } catch {
-                                return (name, nil)
+                                return (name, nil, error.localizedDescription)
                             }
                         }
                     }
@@ -62,7 +62,7 @@ final class SearchManager: ObservableObject {
                 for _ in 0..<window { addNext() }
                 for await result in group {
                     if Task.isCancelled { break }
-                    if let (name, list) = result {
+                    if let (name, list, reason) = result {
                         if let list {
                             collected.append(contentsOf: list)
                             await MainActor.run {
@@ -70,10 +70,11 @@ final class SearchManager: ObservableObject {
                                 self.merge(list)
                             }
                         } else {
-                            failed.append(name)
+                            let entry = reason.isEmpty ? name : "\(name)：\(reason)"
+                            failed.append(entry)
                             await MainActor.run {
                                 guard let self else { return }
-                                self.failures.append(name)
+                                self.failures.append(entry)
                             }
                         }
                         await MainActor.run {

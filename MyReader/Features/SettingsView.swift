@@ -261,6 +261,26 @@ struct TTSVoiceSettingsView: View {
                         }
                     }
                 }
+                Section {
+                    Toggle("混合音频（不打断其他App声音）", isOn: Binding(
+                        get: { store.settings.ttsMixAudio },
+                        set: { v in store.updateSettings { $0.ttsMixAudio = v } }
+                    ))
+                    Stepper("本地听书分段字符数：\(store.settings.ttsSegmentChars)",
+                            value: Binding(
+                                get: { store.settings.ttsSegmentChars },
+                                set: { v in store.updateSettings { $0.ttsSegmentChars = v } }
+                            ), in: 100...2000, step: 100)
+                    Toggle("读完自动接续下一章", isOn: Binding(
+                        get: { store.settings.ttsAutoNext },
+                        set: { v in store.updateSettings { $0.ttsAutoNext = v } }
+                    ))
+                } header: {
+                    Text("听书")
+                } footer: {
+                    Text("混合音频关闭时为独占模式，可用锁屏/控制中心/耳机线控播放暂停与切换分段。")
+                        .font(.caption2)
+                }
             }
             .navigationTitle("朗读设置")
             .navigationBarTitleDisplayMode(.inline)

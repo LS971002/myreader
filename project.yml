@@ -42,6 +42,7 @@ targets:
       - sdk: AVFoundation.framework
       - sdk: UniformTypeIdentifiers.framework
       - sdk: JavaScriptCore.framework
+      - sdk: MediaPlayer.framework
 
 schemes:
   MyReader:
