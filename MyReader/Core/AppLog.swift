@@ -128,7 +128,9 @@ final class AppLog {
 
     private func truncateIfOversize(_ file: URL) {
         let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int) ?? 0
-        if size > maxFileBytes, let handle = FileHandle(forUpdating: file) {
+        // FileHandle(forUpdating:) 是 throws 且非 Optional 的初始化器：
+        // try? 使其成为 Optional 供条件绑定
+        if size > maxFileBytes, let handle = try? FileHandle(forUpdating: file) {
             // 保留尾部 2MB（最新内容）
             let keep = 2 * 1024 * 1024
             handle.seek(toFileOffset: UInt64(max(0, size - keep)))
