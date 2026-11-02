@@ -236,15 +236,19 @@ enum IBSCrypto {
     private static func aesECBSingleBlock(key: Data, block: [UInt8]) -> [UInt8] {
         var out = [UInt8](repeating: 0, count: 16)
         var moved = 0
+        // exclusivity: 长度在闭包外提取，避免写访问闭包内读 out.count
+        let outCapacity = out.count
+        let keyLength = key.count
+        let blockLength = block.count
         let status = key.withUnsafeBytes { keyPtr -> CCCryptorStatus in
             block.withUnsafeBytes { blockPtr -> CCCryptorStatus in
                 out.withUnsafeMutableBytes { outPtr -> CCCryptorStatus in
                     CCCrypt(
                         CCOperation(kCCEncrypt), CCAlgorithm(kCCAlgorithmAES),
                         CCOptions(kCCOptionECBMode),
-                        keyPtr.baseAddress, key.count, nil,
-                        blockPtr.baseAddress, block.count,
-                        outPtr.baseAddress, out.count, &moved)
+                        keyPtr.baseAddress, keyLength, nil,
+                        blockPtr.baseAddress, blockLength,
+                        outPtr.baseAddress, outCapacity, &moved)
                 }
             }
         }
@@ -319,15 +323,19 @@ enum IBSCrypto {
         guard data.count > 0, data.count % 16 == 0 else { return Data() }
         var out = Data(count: data.count)
         var moved = 0
+        // exclusivity: 长度在闭包外提取，避免写访问闭包内读 out.count
+        let outCapacity = out.count
+        let keyLength = key.count
+        let dataLength = data.count
         let status = key.withUnsafeBytes { keyPtr -> CCCryptorStatus in
             data.withUnsafeBytes { dataPtr -> CCCryptorStatus in
                 out.withUnsafeMutableBytes { outPtr -> CCCryptorStatus in
                     CCCrypt(
                         CCOperation(kCCDecrypt), CCAlgorithm(kCCAlgorithmAES),
                         CCOptions(kCCOptionECBMode),
-                        keyPtr.baseAddress, key.count, nil,
-                        dataPtr.baseAddress, data.count,
-                        outPtr.baseAddress, out.count, &moved)
+                        keyPtr.baseAddress, keyLength, nil,
+                        dataPtr.baseAddress, dataLength,
+                        outPtr.baseAddress, outCapacity, &moved)
                 }
             }
         }
