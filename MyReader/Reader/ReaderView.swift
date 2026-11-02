@@ -10,10 +10,12 @@ struct ReaderView: View {
     @State private var showMenu = false
     @State private var showCatalog = false
     @State private var showSettings = false
-    @State private var showTTS = false
     @State private var dragOffset: CGFloat = 0
     @State private var isTurning = false            // 翻页动画进行中（防重入）
     @State private var zombieGesture = false        // 动画期间开始的手势会话 → 整段作废
+    /// 翻页完成后的短冷却截止时刻：一次物理滑动被SwiftUI拆成两个手势会话时，
+    /// 第二会话在此期间开始 → zombie 屏蔽（防连翻两页）。
+    @State private var cooldownUntil = Date.distantPast
 
     init(book: Book, store: Store) {
         _model = StateObject(wrappedValue: ReaderModel(store: store, book: book))
@@ -73,8 +75,8 @@ struct ReaderView: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         guard settings.pageTurn != .scroll else { return }
-                        // 动画期间开始的手势会话：整段作废（防止解锁后残留位移多翻一页）
-                        if isTurning {
+                        // 动画期间/冷却期内开始的手势会话：整段作废（防拆会话双翻）
+                        if isTurning || Date() < cooldownUntil {
                             zombieGesture = true
                             return
                         }
@@ -131,11 +133,6 @@ struct ReaderView: View {
         }
         .sheet(isPresented: $showSettings) {
             ReaderSettingsPanel(model: model)
-                .environmentObject(store)
-                .environmentObject(theme)
-        }
-        .sheet(isPresented: $showTTS) {
-            TTSBar(model: model)
                 .environmentObject(store)
                 .environmentObject(theme)
         }
@@ -272,6 +269,8 @@ struct ReaderView: View {
                 try? await Task.sleep(nanoseconds: 320_000_000)
             }
             isTurning = false
+            // 冷却期：吸收同一次物理滑动的残余手势会话
+            cooldownUntil = Date().addingTimeInterval(0.15)
         }
     }
 
@@ -337,7 +336,7 @@ struct ReaderView: View {
             HStack(spacing: 0) {
                 menuButton("上一章", "chevron.up") { model.goPreviousChapter() }
                 menuButton("目录", "list.triangle") { showCatalog = true }
-                menuButton("朗读", "waveform") { showTTS = true }
+                menuButton("朗读", "waveform") { SpeechCenter.shared.begin(model: model) }
                 menuButton("设置", "textformat.size") { showSettings = true }
                 menuButton("下一章", "chevron.down") { model.goNextChapter() }
             }

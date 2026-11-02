@@ -243,6 +243,31 @@ final class ReaderModel: ObservableObject {
                              progress: overallProgress(chapter: book.currentChapter, page: pageIndex))
     }
 
+    // MARK: - 朗读定位
+
+    /// 跳到指定章并定位到包含 snippet 的页（朗读退出时回到正在读的句子）。
+    func revealPage(chapter: Int, snippet: String) {
+        guard book.chapters.indices.contains(chapter), !snippet.isEmpty else { return }
+        Task { @MainActor in
+            if book.currentChapter != chapter || pages.count <= 1 {
+                await load(chapterIndex: chapter, targetPage: 0)
+            }
+            guard pages.indices.contains(book.currentPage) || !pages.isEmpty else { return }
+            if let idx = pages.firstIndex(where: { $0.contains(snippet) }) {
+                pageIndex = idx
+                persistProgress()
+            } else {
+                // 找不到精确页：按该段在章内的比例估算
+                let full = pages.joined()
+                if !full.isEmpty, let r = full.range(of: snippet) {
+                    let ratio = Double(full.distance(from: full.startIndex, to: r.lowerBound)) / Double(full.count)
+                    pageIndex = min(max(0, Int(ratio * Double(pages.count))), max(0, pages.count - 1))
+                    persistProgress()
+                }
+            }
+        }
+    }
+
     // MARK: - 缓存
 
     func cacheCurrentChapter() async -> Int {

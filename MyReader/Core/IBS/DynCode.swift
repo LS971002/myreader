@@ -1,5 +1,6 @@
 import Foundation
 import JavaScriptCore
+import CryptoKit
 
 // MARK: - 动态 HTTP 头存储（http.httpManager.requestSerializer 的桥）
 
@@ -131,6 +132,11 @@ final class DynEngine {
     }
 
     // MARK: 入口
+
+    /// 外部（params 占位符求值等）调用：求单个表达式值（支持 calc(...) / 变量 / 字面量）。
+    func evaluate(_ expr: String) -> DynValue {
+        evalExpr(expr)
+    }
 
     /// 执行脚本，返回尾值（显式 return 优先）。
     func execute(_ script: String) -> DynValue {
@@ -582,6 +588,11 @@ final class DynEngine {
         case .classRef("JxdSecuritySub"):
             if selector == "Utf8Encoded", let input = arg0 {
                 return .str(percentEncode(input.stringValue))
+            }
+            // JxdSecuritySub.MD5:query —— UTF8字节MD5，hex小写（七猫sign等签名场景）
+            if selector == "MD5", let input = arg0 {
+                let digest = Insecure.MD5.hash(data: Data(input.stringValue.utf8))
+                return .str(digest.map { String(format: "%02x", $0) }.joined())
             }
             return .null
 

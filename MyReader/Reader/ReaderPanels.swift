@@ -247,22 +247,27 @@ struct ReaderSettingsPanel: View {
     }
 }
 
-// MARK: - 朗读引擎（复刻源APP JxdTTSManager 分段调度 + JxdLocalTTS 参数映射）
+// MARK: - 朗读中心（全局单例：复刻源APP JxdTTSManager 分段调度 + JxdLocalTTS 参数映射）
 
-/// 整章分段朗读 + 滑动窗口缓存：
+/// 整章分段朗读 + 滑动窗口缓存 + APP内常驻后台：
 /// - 向前预合成 3 段（AVSpeech 队列逐段补位），向后保留已播 10 段供上一曲回退
 /// - 语速/音调/音色实时从当前段重启；暂停/恢复为真暂停（.word）
 /// - 独占音频接入系统 NowPlaying（锁屏/控制中心/耳机线控可遥控）
 /// - 章尾自动接续下一章（剩余 ≤3 段时后台预取，无缝续读）；全书读完自动停止
-final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
+/// - 全局单例：切后台/锁屏继续朗读；换书自动杀旧开新；退出朗读定位回阅读页
+final class SpeechCenter: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
+    static let shared = SpeechCenter()
+
     // MARK: 状态（UI 绑定）
-    @Published var speaking = false        // 有朗读任务（播放中或暂停中）
+    @Published var presented = false        // 全屏朗读页显示
+    @Published var speaking = false         // 有朗读任务（播放中或暂停中）
     @Published var paused = false
     @Published var currentSegment = 0
     @Published var totalSegments = 0
     @Published var currentChapter = 0
-    @Published var segmentPreview = ""
     @Published var finishedNotice: String?
+    /// 当前段内正在朗读的字范围（NSRange，willSpeakRange 回调）。
+    @Published var highlightRange: NSRange?
 
     // MARK: 参数（调节后实时应用）
     var rate: Float = 0.5
@@ -273,7 +278,8 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
     var segmentChars = 500
 
     private let synthesizer = AVSpeechSynthesizer()
-    private var segments: [String] = []
+    /// 段落数组（@Published：TTSPage 正文渲染跟随换章刷新）。
+    @Published private(set) var segments: [String] = []
     private var playedStack: [Int] = []          // 已播段历史（最多10，上一曲回退窗口）
     private var utteranceIndex: [ObjectIdentifier: Int] = [:]
     private var chapterLoading = false
@@ -281,19 +287,56 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
     private var remoteCommands: [(command: MPRemoteCommand, token: Any)] = []
 
     /// 拉章文本的来源（ReaderModel.chapterText 带磁盘/网络缓存）。
-    weak var model: ReaderModel?
+    /// strong 引用：朗读期间保持该书阅读模型存活（后台续章预取依赖它）。
+    private(set) var model: ReaderModel?
+    var currentBookID: UUID? { model?.bookID }
 
-    override init() {
+    private override init() {
         super.init()
         synthesizer.delegate = self
         applyAudioSession()
         setupRemoteCommands()
     }
 
-    deinit {
-        for (command, token) in remoteCommands {
-            command.removeTarget(token)
+    // MARK: - 打开朗读（阅读页菜单入口）
+
+    /// 同书 → 续播仅显示页面；异书 → 杀旧开新。
+    func begin(model: ReaderModel) {
+        syncSettings(from: model.store)
+        if let current = self.model, current.bookID == model.bookID, speaking {
+            presented = true
+            restartFromCurrent()   // 设置可能已变化，从当前段以新参数重启
+            return
         }
+        stopAll()
+        self.model = model
+        presented = true
+        start(chapter: model.book.currentChapter)
+    }
+
+    /// 从 Store 同步朗读参数。
+    func syncSettings(from store: Store) {
+        rate = store.settings.ttsRate
+        pitch = store.settings.ttsPitch
+        voiceIdentifier = store.settings.ttsVoice
+        mixAudio = store.settings.ttsMixAudio
+        autoNext = store.settings.ttsAutoNext
+        segmentChars = store.settings.ttsSegmentChars
+    }
+
+    /// 最小化：回阅读界面，后台继续朗读。
+    func minimize() {
+        presented = false
+    }
+
+    /// 手动退出朗读：定位回当前段所在页 + 停止。
+    func exitAndLocate() {
+        if let model, segments.indices.contains(currentSegment) {
+            let snippet = String(segments[currentSegment].prefix(24))
+            model.revealPage(chapter: currentChapter, snippet: snippet)
+        }
+        stopAll()
+        presented = false
     }
 
     // MARK: - 音频会话（独占 / 混合 实时切换）
@@ -335,6 +378,7 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         guard segments.indices.contains(index) else { return }
         synthesizer.stopSpeaking(at: .immediate)
         utteranceIndex.removeAll()
+        highlightRange = nil
         for k in index...min(index + 2, segments.count - 1) {
             enqueue(k)
         }
@@ -431,6 +475,11 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         utteranceIndex.removeAll()
         speaking = false
         paused = false
+        highlightRange = nil
+        segments = []
+        totalSegments = 0
+        currentSegment = 0
+        playedStack.removeAll()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     }
 
@@ -466,12 +515,18 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
 
     // MARK: - AVSpeechSynthesizerDelegate（回调在主线程）
 
+    /// 正在朗读的字范围（源APP notifyPlayRange: 同款——阅读界面高亮跟随）。
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
+                           willSpeakRangeOfSpeechString characterRange: NSRange,
+                           utterance: AVSpeechUtterance) {
+        guard utteranceIndex[ObjectIdentifier(utterance)] != nil else { return }
+        highlightRange = characterRange
+    }
+
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
         guard let idx = utteranceIndex[ObjectIdentifier(utterance)] else { return }
         currentSegment = idx
-        if segments.indices.contains(idx) {
-            segmentPreview = String(segments[idx].prefix(80))
-        }
+        highlightRange = nil
         updateNowPlaying()
         prefetchNextChapterIfNeeded(currentIdx: idx)
     }
@@ -563,124 +618,228 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
     }
 }
 
-// MARK: - 朗读面板
+// MARK: - 全屏朗读页（参照源APP：正文显示 + 朗读高亮跟随 + 控制台悬浮）
 
-struct TTSBar: View {
-    @ObservedObject var model: ReaderModel
+struct TTSPage: View {
+    @ObservedObject private var center = SpeechCenter.shared
     @EnvironmentObject private var store: Store
     @EnvironmentObject private var theme: ThemeManager
-    @Environment(\.dismiss) private var dismiss
-    @StateObject private var manager = SpeechManager()
+    @State private var autoScroll = true
 
     var body: some View {
-        VStack(spacing: 16) {
-            HStack {
-                Text("朗读").font(.headline)
-                Spacer()
-                if let notice = manager.finishedNotice {
-                    Text(notice).font(.caption2).foregroundStyle(.orange)
+        VStack(spacing: 0) {
+            // 顶部：返回(最小化) + 书名/章节 + 退出朗读
+            HStack(spacing: 12) {
+                Button {
+                    center.minimize()
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 17, weight: .medium))
                 }
-                Button("关闭") {
-                    manager.stopAll()
-                    dismiss()
+                VStack(spacing: 2) {
+                    Text(center.model?.book.name ?? "朗读")
+                        .font(.subheadline).lineLimit(1)
+                    Text(chapterTitle)
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .frame(maxWidth: .infinity)
+                if let notice = center.finishedNotice {
+                    Text(notice).font(.caption2).foregroundStyle(.orange).lineLimit(1)
+                }
+                Button {
+                    center.exitAndLocate()
+                } label: {
+                    Text("退出朗读")
+                        .font(.footnote.weight(.medium))
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Color.accentColor.opacity(0.14), in: Capsule())
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.regularMaterial)
+
+            // 正文（当前章全文，段落高亮跟随）
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 14) {
+                        ForEach(0..<max(center.segments.count, 1), id: \.self) { idx in
+                            segmentText(idx)
+                                .id(idx)
+                                .padding(.horizontal, 4)
+                        }
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 20)
+                }
+                .onAppear {
+                    // 打开时定位到正在朗读的段
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        proxy.scrollTo(center.currentSegment, anchor: .center)
+                    }
+                }
+                .onChange(of: center.currentSegment) { newValue in
+                    guard autoScroll, presented else { return }
+                    withAnimation(.easeInOut(duration: 0.35)) {
+                        proxy.scrollTo(newValue, anchor: .center)
+                    }
                 }
             }
 
-            Text(manager.segmentPreview.isEmpty ? "准备中…" : manager.segmentPreview)
-                .font(.footnote)
-                .lineLimit(3)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(12)
-                .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+            // 底部控制台
+            controlPanel
+                .background(.regularMaterial)
+        }
+        .background(theme.current.background.ignoresSafeArea())
+        .preferredColorScheme(store.settings.followSystemDark ? nil : .light)
+        .onAppear {
+            center.syncSettings(from: store)
+            center.applyAudioSession()
+        }
+    }
 
-            Text("第 \(manager.currentSegment + 1)/\(manager.totalSegments) 段 · 第 \(manager.currentChapter + 1)/\(model.book.chapters.count) 章")
+    private var presented: Bool { center.presented }
+
+    private var chapterTitle: String {
+        guard let chapters = center.model?.book.chapters,
+              chapters.indices.contains(center.currentChapter) else { return "" }
+        return chapters[center.currentChapter].title
+    }
+
+    /// 单段渲染：当前段底色 + 正在朗读的字范围着色。
+    @ViewBuilder
+    private func segmentText(_ idx: Int) -> some View {
+        let isCurrent = idx == center.currentSegment && center.speaking
+        Group {
+            if isCurrent {
+                highlightedSegment
+            } else {
+                Text(center.segments.indices.contains(idx) ? center.segments[idx] : "")
+                    .font(.system(size: 17))
+                    .foregroundStyle(theme.current.text)
+                    .lineSpacing(6)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isCurrent ? Color.accentColor.opacity(0.10) : Color.clear)
+        )
+    }
+
+    /// 当前段：highlightRange 内的字高亮着色。
+    @ViewBuilder
+    private var highlightedSegment: some View {
+        let text = center.segments.indices.contains(center.currentSegment)
+            ? center.segments[center.currentSegment] : ""
+        if let range = center.highlightRange,
+           range.location < text.count,
+           let swiftLower = text.index(text.startIndex, offsetBy: range.location,
+                                        limitedBy: text.endIndex),
+           let swiftUpper = text.index(swiftLower, offsetBy: range.length,
+                                        limitedBy: text.endIndex) {
+            (Text(String(text[text.startIndex..<swiftLower]))
+                .foregroundStyle(theme.current.text)
+            + Text(String(text[swiftLower..<swiftUpper]))
+                .foregroundStyle(Color.accentColor)
+                .fontWeight(.medium)
+            + Text(String(text[swiftUpper...]))
+                .foregroundStyle(theme.current.text))
+            .font(.system(size: 17))
+            .lineSpacing(6)
+        } else {
+            Text(text)
+                .font(.system(size: 17))
+                .foregroundStyle(theme.current.text)
+                .lineSpacing(6)
+        }
+    }
+
+    private var controlPanel: some View {
+        VStack(spacing: 12) {
+            Text("第 \(center.currentSegment + 1)/\(center.totalSegments) 段 · 第 \(center.currentChapter + 1)/\(totalChapters) 章")
                 .font(.caption).foregroundStyle(.secondary)
 
-            HStack(spacing: 34) {
+            HStack(spacing: 40) {
                 Button {
-                    manager.prev()
+                    center.prev()
                 } label: {
                     Image(systemName: "backward.end.fill").font(.title2)
                 }
-                .disabled(!manager.speaking)
+                .disabled(!center.speaking)
 
                 Button {
-                    manager.togglePlayPause()
+                    center.togglePlayPause()
                 } label: {
-                    Image(systemName: manager.speaking && !manager.paused
+                    Image(systemName: center.speaking && !center.paused
                           ? "pause.circle.fill" : "play.circle.fill")
-                        .font(.system(size: 46))
+                        .font(.system(size: 48))
                 }
 
                 Button {
-                    manager.next()
+                    center.next()
                 } label: {
                     Image(systemName: "forward.end.fill").font(.title2)
                 }
-                .disabled(!manager.speaking)
+                .disabled(!center.speaking)
             }
             .foregroundStyle(Color.accentColor)
 
-            // 语速（独立滑块，拖动结束实时生效）
-            VStack(alignment: .leading, spacing: 4) {
-                Text("语速，百分之\(Int(store.settings.ttsRatePercent))")
-                    .font(.footnote).foregroundStyle(.secondary)
-                Slider(value: $store.settings.ttsRatePercent, in: 0...100, step: 1,
-                       onEditingChanged: { editing in
-                    if !editing {
-                        manager.rate = store.settings.ttsRate
-                        manager.restartFromCurrent()
-                    }
-                })
+            HStack(spacing: 24) {
+                // 语速（独立滑块，拖动结束实时生效）
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("语速，百分之\(Int(store.settings.ttsRatePercent))")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    Slider(value: $store.settings.ttsRatePercent, in: 0...100, step: 1,
+                           onEditingChanged: { editing in
+                        if !editing {
+                            center.rate = store.settings.ttsRate
+                            center.restartFromCurrent()
+                        }
+                    })
+                }
+                // 音调（独立滑块，拖动结束实时生效）
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("音调，百分之\(Int(store.settings.ttsPitchPercent))")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    Slider(value: $store.settings.ttsPitchPercent, in: 0...100, step: 1,
+                           onEditingChanged: { editing in
+                        if !editing {
+                            center.pitch = store.settings.ttsPitch
+                            center.restartFromCurrent()
+                        }
+                    })
+                }
             }
 
-            // 音调（独立滑块，拖动结束实时生效）
-            VStack(alignment: .leading, spacing: 4) {
-                Text("音调，百分之\(Int(store.settings.ttsPitchPercent))")
-                    .font(.footnote).foregroundStyle(.secondary)
-                Slider(value: $store.settings.ttsPitchPercent, in: 0...100, step: 1,
-                       onEditingChanged: { editing in
-                    if !editing {
-                        manager.pitch = store.settings.ttsPitch
-                        manager.restartFromCurrent()
+            HStack {
+                Toggle("混合音频", isOn: Binding(
+                    get: { store.settings.ttsMixAudio },
+                    set: { v in
+                        store.updateSettings { $0.ttsMixAudio = v }
+                        center.mixAudio = v
+                        center.applyAudioSession()
                     }
-                })
+                ))
+                .font(.caption)
+                Toggle("自动接续", isOn: Binding(
+                    get: { store.settings.ttsAutoNext },
+                    set: { v in
+                        store.updateSettings { $0.ttsAutoNext = v }
+                        center.autoNext = v
+                    }
+                ))
+                .font(.caption)
             }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+    }
 
-            Toggle("混合音频（不打断其他App声音）", isOn: Binding(
-                get: { store.settings.ttsMixAudio },
-                set: { v in
-                    store.updateSettings { $0.ttsMixAudio = v }
-                    manager.mixAudio = v
-                    manager.applyAudioSession()
-                }
-            ))
-            Toggle("读完自动接续下一章", isOn: Binding(
-                get: { store.settings.ttsAutoNext },
-                set: { v in
-                    store.updateSettings { $0.ttsAutoNext = v }
-                    manager.autoNext = v
-                }
-            ))
-        }
-        .padding(20)
-        .compatibleDetents(.bar)
-        .onAppear {
-            manager.model = model
-            manager.rate = store.settings.ttsRate
-            manager.pitch = store.settings.ttsPitch
-            manager.voiceIdentifier = store.settings.ttsVoice
-            manager.mixAudio = store.settings.ttsMixAudio
-            manager.autoNext = store.settings.ttsAutoNext
-            manager.segmentChars = store.settings.ttsSegmentChars
-            manager.applyAudioSession()
-            if !manager.speaking {
-                manager.start(chapter: model.book.currentChapter)
-            }
-        }
-        .onDisappear {
-            manager.stopAll()
-        }
+    private var totalChapters: Int {
+        center.model?.book.chapters.count ?? 0
     }
 }
 

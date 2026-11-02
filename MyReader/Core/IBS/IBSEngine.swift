@@ -45,7 +45,7 @@ final class IBSEngine {
         let node = injectKeyword(node0, placeholder: keywordPlaceholder(node0), keyword: trimmed)
 
         let sourceRef = DynSourceRef(configName: source.name)
-        let step = try await runNode(node, overrideURL: nil, keyword: trimmed,
+        let step = try await runNode(node, overrideURL: nil, keyword: trimmed, pageIndex: 0,
                                      parentFrames: [], sourceRef: sourceRef)
 
         // 最深层 parser：_list + bookName / author / desc + _BookFields.dirURL
@@ -106,7 +106,7 @@ final class IBSEngine {
         }
         var sourceRef = DynSourceRef(configName: source.name)
         sourceRef.detailURL = link
-        let step = try await runNode(node, overrideURL: link, keyword: nil,
+        let step = try await runNode(node, overrideURL: link, keyword: nil, pageIndex: nil,
                                      parentFrames: [], sourceRef: sourceRef)
         let runner = RuleRunner(ctx: makeContext(step: step))
         let dom = HTMLParser.parse(step.text)
@@ -130,8 +130,9 @@ final class IBSEngine {
         var seenTitles = Set<String>()
         let maxPages = max(node.maxPageCount, 1)
 
-        for _ in 0..<min(maxPages, 40) {
+        for pageIndex in 0..<min(maxPages, 40) {
             let step = try await runNode(node, overrideURL: overrideURL, keyword: nil,
+                                         pageIndex: pageIndex,
                                          parentFrames: [], sourceRef: sourceRef)
             guard let listRules = fieldRules(step.parser, "_list"), let listRule = listRules.first else {
                 break
@@ -182,7 +183,7 @@ final class IBSEngine {
         var sourceRef = DynSourceRef(configName: source.name)
         sourceRef.chapterURL = chapter.url
 
-        let step = try await runNode(node, overrideURL: nil, keyword: nil,
+        let step = try await runNode(node, overrideURL: nil, keyword: nil, pageIndex: nil,
                                      parentFrames: [], sourceRef: sourceRef)
 
         // 最深层 parser 的 content 字段（组合规则：@def: JS + @dyn: 提取 + @ex: 取文本）
@@ -208,12 +209,19 @@ final class IBSEngine {
     private func runNode(_ node: RuleNode,
                          overrideURL: String?,
                          keyword: String?,
+                         pageIndex: Int?,
                          parentFrames: [ParentFrame],
                          sourceRef: DynSourceRef) async throws -> StepResult {
         // 1. URL 求值
         let ctx = DynContext(store: store)
         ctx.parentChain = parentFrames
         ctx.source = sourceRef
+        if let pageIndex {
+            ctx.vars["pageIndex"] = .num(Double(pageIndex))
+        }
+        if let keyword {
+            ctx.vars["keyword"] = .str(keyword)
+        }
         if let first = parentFrames.first {
             ctx.respContent = first.respContent
         }
@@ -249,7 +257,7 @@ final class IBSEngine {
 
                 // 3. 请求（含重试）
                 let method = node.forGetMethod ? "GET" : "POST"
-                let params = applyParamsDict(node.params, keyword: keyword)
+                let params = applyParamsDict(node.params, keyword: keyword, ctx: ctx)
                 var staticHeaders = source.httpConfigs?.headers ?? [:]
                 if let nodeHTTP = node.httpConfigs {
                     for (k, v) in nodeHTTP.headers { staticHeaders[k] = v }
@@ -305,7 +313,7 @@ final class IBSEngine {
 
         // 5. middleHandle 递归（子层脚本 self.parent.* 由 parentChain 承载）
         if let middle = node.middleHandle {
-            return try await runNode(middle, overrideURL: nil, keyword: keyword,
+            return try await runNode(middle, overrideURL: nil, keyword: keyword, pageIndex: pageIndex,
                                      parentFrames: frames, sourceRef: sourceRef)
         }
 
@@ -354,13 +362,93 @@ final class IBSEngine {
         return result
     }
 
-    private func applyParamsDict(_ params: [String: String], keyword: String?) -> [String: String] {
-        guard let keyword else { return params }
+    /// params 值的完整求值（对齐爱阅 JxdNetConfigManager params 语义）：
+    /// - `@dyn:...` → 动态脚本执行（ctx 已注入 keyword / pageIndex 变量）
+    /// - `%@keyword` → 搜索词
+    /// - `%@calc(expr)` → 表达式求值（如 calc(pageIndex + 1)）
+    /// - `%@变量名` → DynContext 变量
+    /// - 混合静态文本原样保留
+    private func applyParamsDict(_ params: [String: String], keyword: String?,
+                                 ctx: DynContext) -> [String: String] {
+        guard !params.isEmpty else { return params }
+        // 变量注入（脚本里的裸 keyword / pageIndex 引用）
+        if let keyword {
+            ctx.vars["keyword"] = .str(keyword)
+        }
+        let engine = DynEngine(ctx: ctx)
         var result = params
-        for (k, v) in params where v.contains("%@") {
-            result[k] = v.replacingOccurrences(of: "%@", with: keyword)
+        for (k, v) in params {
+            let trimmed = v.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("@dyn:") {
+                if let s = engine.executeString(String(trimmed.dropFirst(5))) {
+                    result[k] = s
+                }
+                continue
+            }
+            if v.contains("%@") {
+                result[k] = resolveParamPlaceholders(v, engine: engine, keyword: keyword)
+            }
         }
         return result
+    }
+
+    /// 扫描值中的 `%@名称` / `%@calc(expr)` 占位符并替换为求值结果。
+    private func resolveParamPlaceholders(_ value: String, engine: DynEngine, keyword: String?) -> String {
+        var out = ""
+        var i = value.startIndex
+        while i < value.endIndex {
+            // 找 %@ 前缀
+            if value[i] == "%", value.index(after: i) < value.endIndex,
+               value[value.index(after: i)] == "@" {
+                var j = value.index(i, offsetBy: 2)
+                // calc( 表达式占位
+                if value[j...].hasPrefix("calc(") {
+                    var depth = 0
+                    let start = j
+                    while j < value.endIndex {
+                        if value[j] == "(" { depth += 1 }
+                        if value[j] == ")" {
+                            depth -= 1
+                            if depth == 0 {
+                                j = value.index(after: j)
+                                break
+                            }
+                        }
+                        j = value.index(after: j)
+                    }
+                    let exprText = String(value[start..<j])
+                    if case .num(let n) = engine.evaluate(exprText) {
+                        out += DynEngine.trimNumber(n)
+                    } else if case .str(let s) = engine.evaluate(exprText) {
+                        out += s
+                    }
+                    i = j
+                    continue
+                }
+                // 标识符占位（keyword / 变量名）
+                var name = ""
+                while j < value.endIndex {
+                    let c = value[j]
+                    if c.isLetter || c.isNumber || c == "_" { name.append(c) }
+                    else { break }
+                    j = value.index(after: j)
+                }
+                if !name.isEmpty {
+                    if name == "keyword", let keyword {
+                        out += keyword
+                    } else if case .num(let n)? = engine.ctx.vars[name] {
+                        out += DynEngine.trimNumber(n)
+                    } else if case .str(let s)? = engine.ctx.vars[name] {
+                        out += s
+                    }
+                    i = j
+                    continue
+                }
+            }
+            out.append(value[i])
+            i = value.index(after: i)
+        }
+        return out
     }
 
     /// XDKEYWORD 占位词（节点 extraKeys 中 ^-^XDKEYWORD 开头的值）。

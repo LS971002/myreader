@@ -2,6 +2,8 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var store: Store
+    @EnvironmentObject private var theme: ThemeManager
+    @ObservedObject private var speech = SpeechCenter.shared
 
     var body: some View {
         TabView {
@@ -15,6 +17,12 @@ struct RootView: View {
                 .tabItem { Label("我的", systemImage: "person.crop.circle") }
         }
         .tint(Color(hex: 0x2F6B4F))
+        // 全屏朗读页（全局：后台常驻，任何入口打开）
+        .fullScreenCover(isPresented: $speech.presented) {
+            TTSPage()
+                .environmentObject(store)
+                .environmentObject(theme)
+        }
         // 导入确认（TXT / EPUB 草稿）
         .sheet(item: $store.incomingDraft) { book in
             IncomingBookSheet(draft: book)
