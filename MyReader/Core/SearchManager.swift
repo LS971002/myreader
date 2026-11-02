@@ -70,7 +70,8 @@ final class SearchManager: ObservableObject {
                                 self.merge(list)
                             }
                         } else {
-                            let entry = reason.isEmpty ? name : "\(name)：\(reason)"
+                            let reasonText = reason ?? ""
+                            let entry = reasonText.isEmpty ? name : "\(name)：\(reasonText)"
                             failed.append(entry)
                             await MainActor.run {
                                 guard let self else { return }

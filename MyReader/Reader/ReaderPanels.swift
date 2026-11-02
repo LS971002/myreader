@@ -277,7 +277,8 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
     private var playedStack: [Int] = []          // 已播段历史（最多10，上一曲回退窗口）
     private var utteranceIndex: [ObjectIdentifier: Int] = [:]
     private var chapterLoading = false
-    private var remoteTokens: [Any?] = []
+    /// 远程命令与各自 target token（removeTarget 是命令对象的方法）。
+    private var remoteCommands: [(command: MPRemoteCommand, token: Any)] = []
 
     /// 拉章文本的来源（ReaderModel.chapterText 带磁盘/网络缓存）。
     weak var model: ReaderModel?
@@ -290,8 +291,8 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
     }
 
     deinit {
-        for token in remoteTokens {
-            if let token { MPRemoteCommandCenter.shared().removeTarget(token) }
+        for (command, token) in remoteCommands {
+            command.removeTarget(token)
         }
     }
 
@@ -525,22 +526,17 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
 
     private func setupRemoteCommands() {
         let center = MPRemoteCommandCenter.shared()
-        remoteTokens.append(center.playCommand.addTarget { [weak self] _ in
-            DispatchQueue.main.async { self?.resume() }
-            return .success
-        })
-        remoteTokens.append(center.pauseCommand.addTarget { [weak self] _ in
-            DispatchQueue.main.async { self?.pause() }
-            return .success
-        })
-        remoteTokens.append(center.nextTrackCommand.addTarget { [weak self] _ in
-            DispatchQueue.main.async { self?.next() }
-            return .success
-        })
-        remoteTokens.append(center.previousTrackCommand.addTarget { [weak self] _ in
-            DispatchQueue.main.async { self?.prev() }
-            return .success
-        })
+        func bind(_ command: MPRemoteCommand, handler: @escaping () -> Void) {
+            let token = command.addTarget { _ in
+                DispatchQueue.main.async { handler() }
+                return .success
+            }
+            if let token { remoteCommands.append((command, token)) }
+        }
+        bind(center.playCommand) { [weak self] in self?.resume() }
+        bind(center.pauseCommand) { [weak self] in self?.pause() }
+        bind(center.nextTrackCommand) { [weak self] in self?.next() }
+        bind(center.previousTrackCommand) { [weak self] in self?.prev() }
     }
 
     private func updateNowPlaying() {
@@ -559,7 +555,7 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         info[MPMediaItemPropertyTitle] = chapterTitle.isEmpty ? bookName : chapterTitle
         info[MPMediaItemPropertyArtist] = bookName
         info[MPMediaItemPropertyAlbumTitle] = "听书"
-        info[MPNowPlayingInfoPropertyPlaybackDuration] = Double(max(totalSegments, 1))
+        info[MPMediaItemPropertyPlaybackDuration] = Double(max(totalSegments, 1))
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = Double(currentSegment)
         info[MPNowPlayingInfoPropertyPlaybackRate] = paused ? 0.0 : 1.0
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
