@@ -10,7 +10,6 @@ struct ShelfView: View {
     @State private var showGroups = false
     @State private var selectedGroup: UUID? = nil
     @State private var importError: String?
-    @State private var importMessage: String?
     @State private var searchText = ""
     @State private var detailBook: Book?
     @State private var cacheBook: Book?
@@ -125,19 +124,6 @@ struct ShelfView: View {
             } message: {
                 Text(importError ?? "")
             }
-            .overlay(alignment: .bottom) {
-                if let message = importMessage {
-                    Text(message)
-                        .font(.footnote)
-                        .padding(.horizontal, 14).padding(.vertical, 9)
-                        .background(.thinMaterial, in: Capsule())
-                        .padding(.bottom, 20)
-                        .task {
-                            try? await Task.sleep(nanoseconds: 2_500_000_000)
-                            importMessage = nil
-                        }
-                }
-            }
             .sheet(item: $detailBook) { book in
                 BookDetailSheet(book: book)
                     .environmentObject(store)
@@ -176,25 +162,23 @@ struct ShelfView: View {
         case .success(let urls):
             var sourceCount = 0
             for url in urls {
-                do {
-                    let ext = url.pathExtension.lowercased()
-                    if ext == "ibs" {
-                        sourceCount += try Importer.importIBS(from: url)
-                    } else if ext == "json" {
-                        sourceCount += try Importer.importBookSources(from: url)
-                    } else {
-                        let book = try Importer.importBook(from: url)
-                        store.addBook(book)
-                        if !book.coverURL.isEmpty {
-                            BookActions.downloadCover(book: book, store: store)
-                        }
-                    }
-                } catch {
-                    importError = "\(url.lastPathComponent)：\(error.localizedDescription)"
+                guard let file = Importer.readIncoming(url: url) else {
+                    importError = "无法读取文件：\(url.lastPathComponent)"
+                    continue
+                }
+                switch file.ext {
+                case "ibs", "json":
+                    let outcome = Importer.processIncoming(file)
+                    if case .sources(let count, _) = outcome { sourceCount += count }
+                    if case .failed(let message) = outcome { importError = message }
+                default:
+                    // TXT / EPUB 走导入确认 Sheet
+                    let outcome = Importer.processIncoming(file)
+                    store.present(outcome)
                 }
             }
             if sourceCount > 0 {
-                importMessage = "已导入 \(sourceCount) 个书源，可到「发现」搜索"
+                store.importNotice = "已导入 \(sourceCount) 个书源，可到「发现」页搜索"
             }
         case .failure(let error):
             importError = error.localizedDescription

@@ -12,6 +12,11 @@ final class Store: ObservableObject {
     @Published var bookmarks: [Bookmark] = []
     @Published var settings: AppSettings = AppSettings()
 
+    /// 「用其他应用打开」导入的书源/书籍草稿（导入确认 Sheet / 全局提示）。
+    @Published var incomingDraft: Book?
+    @Published var incomingSplitMode: Importer.SplitMode = .smart
+    @Published var importNotice: String?
+
     /// 解析后的书源（records 变更时重建）。
     private(set) var sources: [IBSBookSource] = []
 
@@ -74,6 +79,22 @@ final class Store: ObservableObject {
         let encoder = LenientJSON.encoder
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return try? encoder.encode(value)
+    }
+
+    // MARK: - 导入结果呈现
+
+    /// 主线程调用：书源 → 全局提示；书籍 → 弹出导入确认 Sheet。
+    func present(_ outcome: Importer.IncomingOutcome) {
+        switch outcome {
+        case .sources(let count, let firstName):
+            let name = firstName.isEmpty ? "" : "（\(firstName)）"
+            importNotice = "已导入 \(count) 个书源\(name)，可到「发现」页搜索"
+        case .bookDraft(let book):
+            incomingSplitMode = .smart
+            incomingDraft = book
+        case .failed(let message):
+            importNotice = message
+        }
     }
 
     // MARK: - 书源
