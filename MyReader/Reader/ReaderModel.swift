@@ -249,6 +249,15 @@ final class ReaderModel: ObservableObject {
                              progress: overallProgress(chapter: book.currentChapter, page: pageIndex))
     }
 
+    // MARK: - 换源
+
+    /// 换源后：清分页缓存并重新加载当前章（书对象已由 Sheet 就地更新）。
+    func reloadAfterSourceChange() {
+        pageCache.removeAll()
+        goToLastPage = false
+        Task { await load(chapterIndex: book.currentChapter, targetPage: 0) }
+    }
+
     // MARK: - 朗读定位
 
     /// 跳到指定章并定位到包含 snippet 的页（朗读退出时回到正在读的句子）。

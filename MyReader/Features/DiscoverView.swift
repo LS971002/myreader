@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 发现页：多书源并行搜索（先到先显示）→ 跨源聚合 → 选源加入书架。
+/// 发现页：多源并行搜索 → 书籍聚合列表（标题行操作）→ 详情页按源列表选源加入。
 struct DiscoverView: View {
     @EnvironmentObject private var store: Store
     @StateObject private var manager = SearchManager()
@@ -8,9 +8,10 @@ struct DiscoverView: View {
     @State private var keyword = ""
     @State private var addedMessage: String?
     @State private var showSourceList = false
-    @State private var expandedGroup: UUID?
     /// 最近一次搜索的词（区分"未搜索"与"搜完无结果"两种空态）。
     @State private var lastSearched: String?
+    /// 详情页（按源列表选源加入）。
+    @State private var detailGroup: GroupedResult?
     /// 导出日志文件（分享面板）。
     @State private var exportedLog: URL?
 
@@ -43,6 +44,11 @@ struct DiscoverView: View {
             }
             .sheet(isPresented: $showSourceList) {
                 BookSourceListView()
+                    .environmentObject(store)
+            }
+            // 详情页（按源列表选源加入）
+            .sheet(item: $detailGroup) { group in
+                BookSourcePickerView(group: group)
                     .environmentObject(store)
             }
             .sheet(item: Binding(
@@ -112,6 +118,21 @@ struct DiscoverView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var emptyState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "safari").font(.system(size: 46)).foregroundStyle(.secondary)
+            Text("输入书名开始搜索").font(.headline)
+            Text("支持书名精确 / 模糊匹配与作者搜索\n当前启用 \(store.enabledSources.count) 个书源")
+                .font(.footnote).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            if store.enabledSources.isEmpty {
+                Button("去添加书源") { showSourceList = true }
+                    .buttonStyle(.bordered)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     /// 搜完无结果（区别于未搜索的初始态）。
     private var noResultState: some View {
         VStack(spacing: 12) {
@@ -144,67 +165,17 @@ struct DiscoverView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "safari").font(.system(size: 46)).foregroundStyle(.secondary)
-            Text("输入书名开始搜索").font(.headline)
-            Text("支持书名精确 / 模糊匹配与作者搜索\n当前启用 \(store.enabledSources.count) 个书源")
-                .font(.footnote).foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            if store.enabledSources.isEmpty {
-                Button("去添加书源") { showSourceList = true }
-                    .buttonStyle(.bordered)
-            } else if !manager.failures.isEmpty {
-                VStack(spacing: 4) {
-                    Text("部分书源未响应：")
-                        .font(.caption2).foregroundStyle(.orange)
-                    ForEach(manager.failures.prefix(3), id: \.self) { entry in
-                        Text(entry).font(.caption2).foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    // MARK: - 结果列表（跨源聚合）
+    // MARK: - 结果列表（书籍聚合：标题行 + 操作）
 
     private var resultList: some View {
         List {
             ForEach(manager.groups) { group in
-                Section {
-                    GroupedResultRow(group: group, expanded: expandedGroup == group.id) {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            expandedGroup = (expandedGroup == group.id) ? nil : group.id
-                        }
-                    }
-                    if expandedGroup == group.id {
-                        ForEach(group.items) { item in
-                            Button {
-                                add(item)
-                            } label: {
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text(item.sourceName)
-                                            .font(.subheadline)
-                                        if !item.intro.isEmpty {
-                                            Text(item.intro)
-                                                .font(.caption2).foregroundStyle(.secondary)
-                                                .lineLimit(2)
-                                        }
-                                    }
-                                    Spacer()
-                                    Text(addLabel(for: item))
-                                        .font(.caption).foregroundStyle(.tint)
-                                    Image(systemName: "plus.circle")
-                                        .foregroundStyle(.tint)
-                                }
-                                .padding(.vertical, 3)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
+                BookRow(group: group,
+                        onShelf: store.books.contains {
+                            $0.name == group.title && $0.author == group.author
+                        },
+                        onAdd: { addBest(group) },
+                        onDetail: { detailGroup = group })
             }
             if !manager.failures.isEmpty {
                 Section(header: Text("未响应的书源")) {
@@ -217,79 +188,191 @@ struct DiscoverView: View {
         .listStyle(.plain)
     }
 
-    private func addLabel(for item: SearchResult) -> String {
-        if store.books.contains(where: {
-            $0.sourceID == item.sourceID && $0.name == item.title
-        }) {
-            return "已加书架"
-        }
-        return "加入书架"
-    }
-
     // MARK: - 动作
 
     private func startSearch() {
         let text = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        expandedGroup = nil
         lastSearched = text
         manager.search(keyword: text, sources: store.enabledSources,
                        concurrency: store.settings.searchConcurrency)
     }
 
-    private func add(_ item: SearchResult) {
+    /// 一键加入书架：默认第一个可用书源（权重最高）。
+    private func addBest(_ group: GroupedResult) {
+        guard let best = group.items.first else { return }
+        addToShelf(best)
+    }
+
+    private func addToShelf(_ item: SearchResult) {
         Task {
             do {
                 let book = try await BookActions.add(result: item, store: store)
                 addedMessage = "已加入书架：\(book.name)（\(book.chapters.count) 章）"
+                AppLog.info("SEARCH", "加入书架：\(book.name)（源:\(item.sourceName)，\(book.chapters.count)章）")
             } catch {
                 addedMessage = "加入失败：\(error.localizedDescription)"
+                AppLog.error("SEARCH", "加入书架失败[\(item.sourceName)]: \(error.localizedDescription)")
             }
         }
     }
 }
 
-// MARK: - 聚合结果行
+// MARK: - 书籍行（标题 + 作者 + 双操作）
 
-struct GroupedResultRow: View {
+struct BookRow: View {
     let group: GroupedResult
-    let expanded: Bool
-    let onToggle: () -> Void
+    let onShelf: Bool
+    let onAdd: () -> Void
+    let onDetail: () -> Void
 
     var body: some View {
-        Button(action: onToggle) {
-            HStack(alignment: .top, spacing: 10) {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(group.title)
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.primary)
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(group.title)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                if !group.author.isEmpty {
+                    Text(group.author)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                if !group.latest.isEmpty {
+                    Text("最新：\(group.latest)")
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer()
+            VStack(spacing: 8) {
+                // 加入书架（默认第一个书源）
+                Button(action: onAdd) {
+                    Text(onShelf ? "已在架" : "加入书架")
+                        .font(.caption.weight(.medium))
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .frame(minWidth: 68)
+                        .background(
+                            Capsule().fill(onShelf ? Color.secondary.opacity(0.18) : Color.accentColor.opacity(0.16))
+                        )
+                        .foregroundStyle(onShelf ? Color.secondary : Color.accentColor)
+                }
+                .buttonStyle(.plain)
+                .disabled(onShelf)
+
+                // 查看详情（按源列表）
+                Button(action: onDetail) {
+                    HStack(spacing: 3) {
+                        Text("详情")
+                        Text("\(group.items.count)源")
+                            .font(.caption2)
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .frame(minWidth: 68)
+                    .background(Capsule().stroke(Color.secondary.opacity(0.35), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+}
+
+// MARK: - 详情页（按源列表选源加入）
+
+/// 同一本书的多源列表：展示各源链接/最新章节，选定后加入书架。
+struct BookSourcePickerView: View {
+    let group: GroupedResult
+    @EnvironmentObject private var store: Store
+    @Environment(\.dismiss) private var dismiss
+    @State private var adding: String?
+    @State private var message: String?
+
+    var body: some View {
+        NavigationView {
+            List {
+                Section {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(group.title).font(.headline)
                         if !group.author.isEmpty {
-                            Text(group.author)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            Text("作者：\(group.author)")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
-                        Spacer()
-                        Text("\(group.items.count) 个源")
-                            .font(.caption2)
-                            .foregroundStyle(.tint)
-                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        if !group.intro.isEmpty {
+                            Text(group.intro)
+                                .font(.caption).foregroundStyle(.secondary)
+                                .lineLimit(6)
+                        }
                     }
-                    if !group.latest.isEmpty {
-                        Text("最新：\(group.latest)")
-                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    .padding(.vertical, 4)
+                }
+
+                Section("选择书源加入书架（\(group.items.count) 个）") {
+                    ForEach(group.items) { item in
+                        Button {
+                            add(item)
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(item.sourceName)
+                                        .font(.subheadline)
+                                        .foregroundStyle(.primary)
+                                    if !item.latest.isEmpty {
+                                        Text(item.latest)
+                                            .font(.caption2).foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                }
+                                Spacer()
+                                if adding == item.sourceName {
+                                    ProgressView()
+                                } else if store.books.contains(where: {
+                                    $0.sourceID == item.sourceID && $0.name == item.title
+                                }) {
+                                    Text("已在架")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                } else {
+                                    Image(systemName: "plus.circle")
+                                        .foregroundStyle(.tint)
+                                }
+                            }
+                        }
+                        .disabled(adding != nil)
                     }
-                    if !group.intro.isEmpty && !expanded {
-                        Text(group.intro)
-                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+
+                if let message {
+                    Section {
+                        Text(message).font(.caption).foregroundStyle(.orange)
                     }
                 }
             }
-            .padding(.vertical, 5)
-            .contentShape(Rectangle())
+            .listStyle(.insetGrouped)
+            .navigationTitle("书籍详情")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("关闭") { dismiss() }
+                }
+            }
         }
-        .buttonStyle(.plain)
+        .navigationViewStyle(.stack)
+    }
+
+    private func add(_ item: SearchResult) {
+        adding = item.sourceName
+        Task {
+            do {
+                let book = try await BookActions.add(result: item, store: store)
+                message = "已加入：\(book.name)（\(book.chapters.count) 章）"
+                AppLog.info("SEARCH", "详情页加入：\(book.name)（源:\(item.sourceName)，\(book.chapters.count)章）")
+            } catch {
+                message = "加入失败：\(error.localizedDescription)"
+                AppLog.error("SEARCH", "详情页加入失败[\(item.sourceName)]: \(error.localizedDescription)")
+            }
+            adding = nil
+        }
     }
 }

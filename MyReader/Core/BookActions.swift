@@ -81,6 +81,39 @@ enum BookActions {
         return updated
     }
 
+    /// 换源：切换书源重新解析目录（正文缓存按旧源磁盘文件保留，索引对得上的章节直接复用）。
+    static func changeSource(book: Book, to newSource: IBSBookSource, store: Store) async throws -> Book {
+        AppLog.info("SOURCE", "换源：\(book.name) \(book.sourceName ?? "?") → \(newSource.name)")
+        var updated = book
+        updated.sourceID = newSource.id
+        updated.sourceName = newSource.name
+        // detailURL 需按新源重新解析——搜索接口用书名定位该书
+        let engine = IBSEngine(source: newSource)
+        let results = try await engine.search(keyword: book.name)
+        guard let match = results.first(where: { $0.title == book.name })
+            ?? results.first(where: { $0.title.localizedCaseInsensitiveContains(book.name) })
+            ?? results.first else {
+            AppLog.warn("SOURCE", "换源失败：新源搜索「\(book.name)」无结果")
+            throw BookSourceEngineError.missingSource
+        }
+        updated.detailURL = match.link
+        let chapters = try await engine.directory(link: match.link)
+        if !chapters.isEmpty {
+            // 保留已缓存标记（索引对得上的章节直接复用旧缓存正文）
+            updated.chapters = chapters.map { chapter in
+                var copy = chapter
+                copy.cached = Paths.readChapter(bookID: book.id, index: chapter.index) != nil
+                return copy
+            }
+            // 进度保护：定位到同章节
+            updated.currentChapter = min(book.currentChapter, max(0, chapters.count - 1))
+            updated.currentPage = 0
+        }
+        store.updateBook(updated)
+        AppLog.info("SOURCE", "换源完成：\(chapters.count)章，当前第\(updated.currentChapter + 1)章")
+        return updated
+    }
+
     /// 导出书籍为 TXT。
     static func exportTXT(book: Book) -> URL? {
         var text = book.name + "\n" + book.author + "\n\n"

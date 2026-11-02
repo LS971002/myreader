@@ -10,6 +10,7 @@ struct ReaderView: View {
     @State private var showMenu = false
     @State private var showCatalog = false
     @State private var showSettings = false
+    @State private var showSourceSwitch = false
     @State private var dragOffset: CGFloat = 0
     @State private var isTurning = false            // 翻页动画进行中（防重入）
     @State private var zombieGesture = false        // 动画期间开始的手势会话 → 整段作废
@@ -139,6 +140,10 @@ struct ReaderView: View {
             ReaderSettingsPanel(model: model)
                 .environmentObject(store)
                 .environmentObject(theme)
+        }
+        .sheet(isPresented: $showSourceSwitch) {
+            SourceSwitchSheet(model: model)
+                .environmentObject(store)
         }
     }
 
@@ -375,7 +380,14 @@ struct ReaderView: View {
                 menuButton("上一章", "chevron.up") { model.jump(to: max(0, model.book.currentChapter - 1)) }
                 menuButton("目录", "list.triangle") { showCatalog = true }
                 menuButton("朗读", "waveform") { SpeechCenter.shared.begin(model: model) }
-                menuButton("设置", "textformat.size") { showSettings = true }
+                // 换源（在线书可用）
+                menuButton(model.book.origin == .online ? "换源" : "设置", "arrow.triangle.2.circlepath") {
+                    if model.book.origin == .online {
+                        showSourceSwitch = true
+                    } else {
+                        showSettings = true
+                    }
+                }
                 menuButton("下一章", "chevron.down") { model.goNextChapter() }
             }
             .padding(.vertical, 10)

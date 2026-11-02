@@ -205,29 +205,46 @@ final class IBSEngine {
     // MARK: - 正文
 
     func content(chapter: Chapter) async throws -> String {
-        guard let node = source.chapterDetail else { return "" }
+        guard let node = source.chapterDetail else {
+            AppLog.warn("CONTENT", "〔\(source.name)〕无chapterDetail节点，正文将为空")
+            return ""
+        }
         var sourceRef = DynSourceRef(configName: source.name)
         sourceRef.chapterURL = chapter.url
 
         let step = try await runNode(node, overrideURL: nil, keyword: nil, pageIndex: nil,
                                      parentFrames: [], sourceRef: sourceRef)
+        AppLog.debug("CONTENT", "〔\(source.name)〕章节页响应 \(step.text.count) 字符")
 
         // 最深层 parser 的 content 字段（组合规则：@def: JS + @dyn: 提取 + @ex: 取文本）
         if let contentRules = fieldRules(step.parser, "content") {
             let runner = RuleRunner(ctx: makeContext(step: step))
             let dom = HTMLParser.parse(step.text)
             let text = runner.run(RuleValue.combo(contentRules), input: step.text, dom: dom)
-            if let text, !text.isEmpty { return Self.cleanContent(text) }
+            if let text, !text.isEmpty {
+                let cleaned = Self.cleanContent(text)
+                AppLog.info("CONTENT", "〔\(source.name)〕content规则命中：\(cleaned.count)字")
+                return cleaned
+            }
+            AppLog.warn("CONTENT", "〔\(source.name)〕content规则空结果（规则: \(contentRules.first?.prefix(60) ?? "")）")
+        } else {
+            AppLog.warn("CONTENT", "〔\(source.name)〕最深层parser无content字段（键: \(step.parser.keys.sorted().prefix(8).joined(separator: ","))）")
         }
         // 兜底：_range
         if let rangeRules = fieldRules(step.parser, "_range") {
             let runner = RuleRunner(ctx: makeContext(step: step))
             let dom = HTMLParser.parse(step.text)
             let text = runner.run(RuleValue.combo(rangeRules), input: step.text, dom: dom)
-            if let text, !text.isEmpty { return Self.cleanContent(text) }
+            if let text, !text.isEmpty {
+                let cleaned = Self.cleanContent(text)
+                AppLog.info("CONTENT", "〔\(source.name)〕_range兜底命中：\(cleaned.count)字")
+                return cleaned
+            }
         }
         // 最终兜底：整页转文本
-        return Self.cleanContent(HTMLParser.htmlToText(step.text))
+        let fallback = Self.cleanContent(HTMLParser.htmlToText(step.text))
+        AppLog.warn("CONTENT", "〔\(source.name)〕整页兜底：\(fallback.count)字（content规则未命中时的产物）")
+        return fallback
     }
 
     // MARK: - 节点执行（核心）
