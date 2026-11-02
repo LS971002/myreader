@@ -1,6 +1,7 @@
 import Foundation
 import JavaScriptCore
 import CryptoKit
+import CommonCrypto
 
 // MARK: - 动态 HTTP 头存储（http.httpManager.requestSerializer 的桥）
 
@@ -608,6 +609,46 @@ final class DynEngine {
             if selector == "MD5", let input = arg0 {
                 let digest = Insecure.MD5.hash(data: Data(input.stringValue.utf8))
                 return .str(digest.map { String(format: "%02x", $0) }.joined())
+            }
+            // JxdSecuritySub.AESDecryptBase64:c pw:pw iv:iv —— AES-128-CBC
+            // key/iv = 密码字符串的ASCII字节（16字符=16B），输入Base64（猫眼正文解密）
+            if selector == "AESDecryptBase64", let input = arg0 {
+                let pw = labels.first { $0.0 == "pw" }?.1.stringValue ?? ""
+                let iv = labels.first { $0.0 == "iv" }?.1.stringValue ?? ""
+                guard let cipherData = Data(base64Encoded: input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                    return .null
+                }
+                let keyData = Data(pw.utf8).prefix(16)
+                let ivData = Data(iv.utf8).prefix(16)
+                guard keyData.count == 16, ivData.count == 16,
+                      cipherData.count > 0, cipherData.count % 16 == 0 else {
+                    return .null
+                }
+                var out = Data(count: cipherData.count)
+                var moved = 0
+                let outCapacity = out.count
+                let keyLength = 16
+                let dataLength = cipherData.count
+                let status = keyData.withUnsafeBytes { keyPtr -> CCCryptorStatus in
+                    ivData.withUnsafeBytes { ivPtr -> CCCryptorStatus in
+                        cipherData.withUnsafeBytes { dataPtr -> CCCryptorStatus in
+                            out.withUnsafeMutableBytes { outPtr -> CCCryptorStatus in
+                                CCCrypt(
+                                    CCOperation(kCCDecrypt), CCAlgorithm(kCCAlgorithmAES),
+                                    CCOptions(kCCOptionPKCS7Padding),
+                                    keyPtr.baseAddress, keyLength,
+                                    ivPtr.baseAddress,
+                                    dataPtr.baseAddress, dataLength,
+                                    outPtr.baseAddress, outCapacity, &moved)
+                            }
+                        }
+                    }
+                }
+                _ = status
+                if moved > 0, moved <= out.count {
+                    out.removeSubrange(moved..<out.count)
+                }
+                return .str(String(data: out, encoding: .utf8) ?? "")
             }
             return .null
 

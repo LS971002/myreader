@@ -149,13 +149,18 @@ final class IBSEngine {
     // MARK: - 目录
 
     func directory(link: String) async throws -> [Chapter] {
-        guard let node = source.sourceDetail else { return [] }
+        guard let node = source.sourceDetail else {
+            AppLog.warn("DIR", "〔\(source.name)〕无sourceDetail节点")
+            return []
+        }
         var sourceRef = DynSourceRef(configName: source.name)
         sourceRef.dirURL = link
         sourceRef.detailURL = link
 
         var chapters: [Chapter] = []
-        var overrideURL: String? = nil
+        // 爱阅语义：sourceDetail.url 为空 = 直接请求目录链接（link）。
+        // 首次请求以 link 为目标，后续翻页由 nextPageUrl 求值替换。
+        var overrideURL: String? = link
         var seenTitles = Set<String>()
         let maxPages = max(node.maxPageCount, 1)
 
@@ -215,7 +220,8 @@ final class IBSEngine {
         var sourceRef = DynSourceRef(configName: source.name)
         sourceRef.chapterURL = chapter.url
 
-        let step = try await runNode(node, overrideURL: nil, keyword: nil, pageIndex: nil,
+        // 爱阅语义：chapterDetail.url 为空 = 直接请求章节URL（chapter.url）
+        let step = try await runNode(node, overrideURL: chapter.url, keyword: nil, pageIndex: nil,
                                      parentFrames: [], sourceRef: sourceRef)
         AppLog.debug("CONTENT", "〔\(source.name)〕章节页响应 \(step.text.count) 字符")
 
