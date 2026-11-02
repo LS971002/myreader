@@ -1,123 +1,84 @@
 # 我的阅读（MyReader）
 
-一个完全免费的 iOS 本地 / 网络小说阅读器，参考「爱阅书香」的使用习惯重新实现：
+一个完全免费的 iOS 本地 / 网络小说阅读器，**完整复刻爱阅书香（iFreeTime）的 IBS 书源体系**：
 
-- **没有任何会员、激励、试用、广告 SDK**。主题、朗读、导出、多书源等全部常驻开启。
-- **没有开屏广告、没有开屏格言**，启动直接进书架。
-- 自带书源规则引擎（CSS 选择器 + `@` 动作链 + XPath 子集），可导入自己的 JSON 书源。
-- 支持本地 TXT / EPUB 导入、章节自动切分、离线缓存。
-- 阅读器：CoreText 精确分页、7 套主题、字号行距段距可调、5 种翻页方式、TTS 朗读、书签与进度记忆。
+- **完整兼容 .ibs 书源文件**：WinZip AES-256 解压 + 双层 AES-128-ECB 解密（含原版「全零 key」bug 的精确复刻），手机上「用其他应用打开」→ 选 MyReader → 自动解密导入为书源。
+- **原生 IBS 规则引擎**：`@dyn:` 动态脚本解释器（def / rule.get / rule.put / check / calc / format / 方法链）、`@def:` JavaScript（JSContext）、`@ex:` XPath 选择器、`@str:` / `@regex:` / `@json:`，middleHandle 多级请求链、每节点独立 HTTP 头 / Cookie、`requestByWebView` 抓取。
+- **多线程多书源并行搜索**：先到先显示 + 书名 / 作者精确模糊匹配 + 跨源聚合（同名同作者合并，N 个源任选）。
+- **完整批量缓存**：整本 / 章节区间 / 仅补未缓存，4 并发下载 + 实时进度 + 失败重试。
+- 本地 TXT / EPUB 导入、章节自动切分；阅读器 CoreText 分页、多主题、字号行距可调、本地 TTS 朗读（音色 / 语速 / 音调节，语速 0~100% 恒等映射、音调 0.5~1.5，对齐爱阅调节范围）。
+- 没有任何会员、激励、广告、开屏。
 
 ## 1. 目录结构
 
 ```
 MyReader/
-├── project.yml                 # XcodeGen 工程描述
+├── project.yml                 # XcodeGen 工程描述（含 JavaScriptCore 依赖）
 ├── MyReader/
-│   ├── Info.plist
-│   ├── App/                    # 入口、Tab 根视图
-│   ├── Core/                   # 数据模型、存储、网络、规则引擎、导入
-│   │   ├── Models.swift        # Book / Chapter / BookSource / AppSettings
-│   │   ├── Store.swift         # JSON 持久化的全局仓库
-│   │   ├── Paths.swift         # 沙盒路径
-│   │   ├── HTMLParser.swift    # 容错 HTML → DOM
-│   │   ├── Selector.swift      # CSS / XPath 子集
-│   │   ├── RuleEngine.swift    # 规则求值
-│   │   ├── Fetcher.swift       # 网络 + 编码识别（UTF-8/GBK/Big5）
-│   │   ├── BookSourceEngine.swift
-│   │   ├── EPUB.swift          # 内置 ZIP 解包 + OPF 解析
-│   │   ├── Importer.swift      # TXT / EPUB / 书源导入
-│   │   └── LenientJSON.swift   # 缺字段自动补默认值
-│   ├── Reader/                 # 分页、阅读器、目录、设置、TTS
-│   └── Features/               # 书架、发现、我的、书源管理
+│   ├── Info.plist               # 已注册 .ibs 文件类型（打开方式可选本 App）
+│   ├── App/                     # 入口、根视图
+│   ├── Core/
+│   │   ├── Models.swift         # IBSBookSource 规则树 / Book / Chapter / 设置
+│   │   ├── Store.swift          # 书源持久化（SourceRecord = 解密 JSON 原文 + 元数据）
+│   │   ├── Paths.swift / Fetcher.swift / HTMLParser.swift / LenientJSON.swift
+│   │   ├── BookActions.swift / Importer.swift（.ibs / TXT / EPUB 导入）
+│   │   ├── SearchManager.swift  # 多源并行搜索 + 跨源聚合
+│   │   ├── CacheManager.swift   # 批量缓存（整本 / 区间 / 并发）
+│   │   ├── EPUB.swift / Theme.swift
+│   │   └── IBS/                 # ★ IBS 引擎核心
+│   │       ├── IBSCrypto.swift      # WinZip AES + 双层 AES 解密
+│   │       ├── DynCode.swift        # @dyn: 脚本解释器（8 类命令 + 对象图）
+│   │       ├── RuleParser.swift     # 规则分发（@dyn/@def/@ex/@str/@regex/@json）
+│   │       ├── ExSelector.swift     # @ex: 选择器（div[@class=x].li[0].a.@href）
+│   │       ├── IBSEngine.swift      # 搜索/详情/目录/正文 四流程 + middleHandle 链
+│   │       ├── HTTPClient.swift     # 动态头 / Cookie / GET / POST
+│   │       └── WebViewFetcher.swift # WKWebView 抓取
+│   ├── Reader/                  # 分页、阅读器、目录、设置、TTS
+│   └── Features/                # 书架、发现（搜索聚合）、书源管理（JSON 编辑）、缓存
 └── .github/workflows/ios-ipa.yml   # 云端出 unsigned IPA
 ```
 
-## 2. 出包（Windows 上也能做）
+## 2. .ibs 书源导入
 
-本机是 Windows，没法直接跑 Xcode。有两条路：
+**方式 A（推荐）**：手机「文件」/ 微信 / Safari 下载 .ibs → 长按 →「用其他应用打开」→ 选 MyReader → 自动解密导入 → 到「发现」搜索。
 
-### A. GitHub Actions（推荐）
+**方式 B**：书源管理页（发现页右上角）→ 导入按钮选 .ibs 文件。
 
-1. 新建一个空仓库，把 `MyReader/` 目录内容推上去（`.github/workflows/ios-ipa.yml` 必须在仓库根目录）。
-2. 打开 Actions → `Build unsigned IPA` → Run workflow。
-3. 跑完在 Artifact 里下载 `MyReader-unsigned-ipa`，解压得到 `MyReader-unsigned.ipa`（未签名）。
-
-### B. macOS 本机
-
-```bash
-brew install xcodegen
-cd MyReader
-xcodegen generate
-xcodebuild -project MyReader.xcodeproj -scheme MyReader -configuration Release \
-  -sdk iphoneos -archivePath build/MyReader.xcarchive archive \
-  CODE_SIGNING_ALLOWED=NO
-mkdir -p build/Payload && cp -R build/MyReader.xcarchive/Products/Applications/MyReader.app build/Payload/
-cd build && zip -qry MyReader-unsigned.ipa Payload
+解密链路（逆向自爱阅书香 6.8.5，逐指令验证）：
+```
+.ibs = WinZip AES-256 (AE-2) ZIP，固定密码（App 内算法生成）
+  → configs.json = [{_passwordConfigs, _encodeConfigs}]
+  → _passwordConfigs: AES-128-ECB(全零 key) → "authorId-密码"
+  → _encodeConfigs: AES-128-ECB(MD5 前十六字符) → 书源 JSON（BookFixConfig 树）
 ```
 
-想直连真机调试，也可以直接用 Xcode 打开工程，把 Signing Team 换成你自己的账号（免费账号 7 天有效，付费开发者 1 年）。
+## 3. IBS 规则引擎
 
-## 3. 用自己的证书自签
+书源 JSON 结构（解密后）：`searchBook / bookDetail / sourceDetail / chapterDetail` 四大规则节点，每个节点含 `url`（可为 `@dyn:` 脚本）、`params`、`parser`（字段→规则）、`middleHandle`（多级请求链）、`httpConfigs`（独立 headers / cookies）、`nextPageUrl`（翻页）。
 
-`MyReader-unsigned.ipa` 需要一个签名工具把**你的证书 + 描述文件**塞进去：
+规则前缀：`@dyn:` 动态脚本、`@def:` JavaScript、`@ex:` 选择器、`@str:` 字符串拼接、`@regex:` 正则、`@json:` 路径；规则值可为数组（组合规则，`contents[i]` 引用前序结果）。
 
-| 工具 | 平台 | 说明 |
-| --- | --- | --- |
-| Sideloadly | Win/Mac | 选 ipa → 填 Apple ID → Start，最省事 |
-| AltStore | Win/Mac | 需装 AltServer，7 天自动续签 |
-| Esign / zsign | iOS / CLI | 选 ipa + `.p12` + `.mobileprovision`，直接签 |
-| ios-deploy / Xcode | Mac | `codesign -f -s "证书名" --entitlements ent.plist MyReader.app` |
-
-命令行签名（Mac）：
-
-```bash
-unzip MyReader-unsigned.ipa -d work && cd work
-codesign -f -s "iPhone Developer: Your Name (XXXXXXXXXX)" \
-  --entitlements MyReader.entitlements Payload/MyReader.app
-zip -qry ../MyReader-signed.ipa Payload
+`@dyn:` 脚本示例（真实书源）：
+```
+url=rule.get:cUrl;
+kwN=def:null;
+okCK=rule.get:ckok;
+flagCK=okCK.containsString:kwN;
+check(!okCK,flagCK=1);
+check(flagCK<1,http.httpManager.requestSerializer setValue:okCK forHTTPHeaderField:Cookie);
+return url
 ```
 
-> Bundle ID 要和你描述文件里的一致。默认是 `com.example.myreader`，改 `project.yml` 里的 `PRODUCT_BUNDLE_IDENTIFIER` 后重新出包，或者签名时改 Info.plist 的 `CFBundleIdentifier`。
+## 4. 出包与自签
 
-## 4. 书源规则怎么写
-
-规则 = `选择器` + `@动作链`，例如：
-
-```
-div.result-list li            搜索结果列表
-div.result-list li a@href@abs 详情链接（自动补全域名）
-h1@text                       书名
-#intro@html2text              简介（保留换行）
-#list dd a@href@abs           章节链接
-#content@html2text            正文
-```
-
-可用动作：`@text`、`@html`、`@ownText`、`@attr(名字)`、`@abs`、`@trim`、`@html2text`、
-`@regex(正则,组号)`、`@replace(旧||新)`、`@index(n)`、`@firstline`、`@lastline`。
-
-XPath 子集也支持：`//div[@class="list"]/ul/li[2]/a/text()`。
-JSON 接口用 `json:data.books[*].title`。
-
-书源 JSON 字段名与 `Core/Models.swift` 里的 `BookSource` 一一对应，
-不认识/缺失的字段会自动补默认值，所以别人导出的书源大多能直接吃。
+见下文「出包」；GitHub Actions 跑 `Build unsigned IPA` → Artifact 下载 → Sideloadly / AltStore / Esign 自签安装。
 
 ## 5. 数据位置
 
-所有数据在 `Documents/MyReader/` 下（Info.plist 已开 `UIFileSharingEnabled`）：
-
-```
-books.json  sources.json  settings.json  bookmarks.json
-Chapters/<bookID>/<章节号>.txt
-Covers/<bookID>.jpg
-Imported/<bookID>.txt|.epub
-```
-
-用「文件」App 或 iTunes 文件共享可以直接把整个目录拷出来备份。
+`Documents/MyReader/`：`books.json`（书架）、`sources.json`（书源：解密 JSON 原文 + 启用状态）、`settings.json`、`Chapters/<bookID>/<章节号>.txt`（正文缓存）、`Covers/`、`Imported/`。开启文件共享可直接备份。
 
 ## 6. 已知边界
 
-- 只做了阅读器本身，没有做书城推荐、评论、社交分享（这些都需要后端服务）。
-- 书源规则没有实现 JS 脚本（`@js:`）与 `@dyn` 动态 UA，遇到强反爬站点需要按站点改规则。
-- EPUB 支持 spine + OPF，内嵌样式会被丢弃（纯文本重排更适合手机阅读）。
-- 未签名 IPA 无法上架 App Store，仅自签个人使用。
+- `httpCreateCode`（书源自定义 Http 实例脚本）：解析保留，执行时仅应用其 headers 副作用。
+- 书源编辑为 JSON 直接编辑（IBS 字段过多，表单不现实）；导出为明文 JSON 数组。
+- 未签名 IPA 仅自签个人使用。

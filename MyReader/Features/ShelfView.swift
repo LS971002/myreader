@@ -10,8 +10,10 @@ struct ShelfView: View {
     @State private var showGroups = false
     @State private var selectedGroup: UUID? = nil
     @State private var importError: String?
+    @State private var importMessage: String?
     @State private var searchText = ""
     @State private var detailBook: Book?
+    @State private var cacheBook: Book?
 
     private var books: [Book] {
         var list = store.books
@@ -56,6 +58,11 @@ struct ShelfView: View {
                                         detailBook = book
                                     } label: {
                                         Label("书籍详情", systemImage: "info.circle")
+                                    }
+                                    Button {
+                                        cacheBook = book
+                                    } label: {
+                                        Label("缓存管理", systemImage: "arrow.down.circle")
                                     }
                                     Menu("移动到分组") {
                                         Button("未分组") { store.moveBook(book, toGroup: nil) }
@@ -105,7 +112,7 @@ struct ShelfView: View {
             .searchable(text: $searchText, prompt: "搜索书架")
             .fileImporter(
                 isPresented: $showImporter,
-                allowedContentTypes: [.item, .plainText, .epub],
+                allowedContentTypes: [.item, .plainText, .epub, .data],
                 allowsMultipleSelection: true
             ) { result in
                 handleImport(result)
@@ -118,10 +125,27 @@ struct ShelfView: View {
             } message: {
                 Text(importError ?? "")
             }
+            .overlay(alignment: .bottom) {
+                if let message = importMessage {
+                    Text(message)
+                        .font(.footnote)
+                        .padding(.horizontal, 14).padding(.vertical, 9)
+                        .background(.thinMaterial, in: Capsule())
+                        .padding(.bottom, 20)
+                        .task {
+                            try? await Task.sleep(nanoseconds: 2_500_000_000)
+                            importMessage = nil
+                        }
+                }
+            }
             .sheet(item: $detailBook) { book in
                 BookDetailSheet(book: book)
                     .environmentObject(store)
                     .environmentObject(theme)
+            }
+            .sheet(item: $cacheBook) { book in
+                CacheSheet(book: book)
+                    .environmentObject(store)
             }
         }
         .navigationViewStyle(.stack)
@@ -150,11 +174,14 @@ struct ShelfView: View {
     private func handleImport(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
+            var sourceCount = 0
             for url in urls {
                 do {
                     let ext = url.pathExtension.lowercased()
-                    if ext == "json" {
-                        try Importer.importBookSources(from: url)
+                    if ext == "ibs" {
+                        sourceCount += try Importer.importIBS(from: url)
+                    } else if ext == "json" {
+                        sourceCount += try Importer.importBookSources(from: url)
                     } else {
                         let book = try Importer.importBook(from: url)
                         store.addBook(book)
@@ -163,8 +190,11 @@ struct ShelfView: View {
                         }
                     }
                 } catch {
-                    importError = error.localizedDescription
+                    importError = "\(url.lastPathComponent)：\(error.localizedDescription)"
                 }
+            }
+            if sourceCount > 0 {
+                importMessage = "已导入 \(sourceCount) 个书源，可到「发现」搜索"
             }
         case .failure(let error):
             importError = error.localizedDescription
@@ -251,6 +281,7 @@ struct BookDetailSheet: View {
     let book: Book
     @State private var busy = false
     @State private var message: String?
+    @State private var showCache = false
 
     var body: some View {
         NavigationView {
@@ -294,7 +325,13 @@ struct BookDetailSheet: View {
                             }
                             .buttonStyle(.bordered)
                         }
-
+                        Button {
+                            showCache = true
+                        } label: {
+                            Text("缓存管理（整本 / 章节区间）")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
                         Button(role: .destructive) {
                             store.removeBook(book)
                             dismiss()
@@ -313,26 +350,22 @@ struct BookDetailSheet: View {
                     Button("关闭") { dismiss() }
                 }
             }
+            .sheet(isPresented: $showCache) {
+                CacheSheet(book: book)
+                    .environmentObject(store)
+            }
         }
     }
 
     private func refreshDirectory() {
-        guard let sourceID = book.sourceID,
-              let source = store.sources.first(where: { $0.id == sourceID }) else {
+        guard book.sourceID != nil, store.source(id: book.sourceID ?? UUID()) != nil else {
             message = "找不到对应书源，无法更新目录"
             return
         }
         busy = true
         Task {
             do {
-                let directory = try await BookSourceEngine(source).directory(detailURL: book.detailURL)
-                var updated = book
-                if !directory.chapters.isEmpty {
-                    updated.chapters = directory.chapters
-                    updated.intro = directory.intro.isEmpty ? book.intro : directory.intro
-                }
-                if !directory.cover.isEmpty { updated.coverURL = directory.cover }
-                store.updateBook(updated)
+                let updated = try await BookActions.refreshDirectory(book: book, store: store)
                 message = "目录已更新，共 \(updated.chapters.count) 章"
             } catch {
                 message = "更新失败：\(error.localizedDescription)"

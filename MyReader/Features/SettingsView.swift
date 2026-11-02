@@ -214,7 +214,7 @@ struct ThemeSettingsView: View {
     }
 }
 
-// MARK: - 朗读设置
+// MARK: - 朗读设置（还原爱阅：语速恒等映射 0~100%，音调 percent → 0.5~1.5）
 
 struct TTSVoiceSettingsView: View {
     @EnvironmentObject private var store: Store
@@ -227,17 +227,26 @@ struct TTSVoiceSettingsView: View {
     var body: some View {
         NavigationView {
             Form {
-                Section("语速") {
-                    Slider(value: Binding(
-                        get: { store.settings.ttsRate },
-                        set: { v in store.updateSettings { $0.ttsRate = v } }
-                    ), in: 0.1...0.9)
-                }
-                Section("音调") {
-                    Slider(value: Binding(
-                        get: { store.settings.ttsPitch },
-                        set: { v in store.updateSettings { $0.ttsPitch = v } }
-                    ), in: 0.5...2.0)
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("语速，百分之\(Int(store.settings.ttsRatePercent))").font(.footnote)
+                        Slider(value: Binding(
+                            get: { store.settings.ttsRatePercent },
+                            set: { v in store.updateSettings { $0.ttsRatePercent = v } }
+                        ), in: 0...100, step: 1)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("音调，百分之\(Int(store.settings.ttsPitchPercent))").font(.footnote)
+                        Slider(value: Binding(
+                            get: { store.settings.ttsPitchPercent },
+                            set: { v in store.updateSettings { $0.ttsPitchPercent = v } }
+                        ), in: 0...100, step: 1)
+                    }
+                } header: {
+                    Text("语速 / 音调")
+                } footer: {
+                    Text("语速对应系统 0.0~1.0（默认 50）；音调实际可调 0.5~1.5（默认 75）。")
+                        .font(.caption2)
                 }
                 Section("发音人") {
                     Picker("发音人", selection: Binding(

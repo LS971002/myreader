@@ -41,6 +41,7 @@ targets:
       - sdk: WebKit.framework
       - sdk: AVFoundation.framework
       - sdk: UniformTypeIdentifiers.framework
+      - sdk: JavaScriptCore.framework
 
 schemes:
   MyReader:

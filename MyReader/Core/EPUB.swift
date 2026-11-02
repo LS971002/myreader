@@ -55,7 +55,7 @@ struct ZipReader {
         return ZipReader.inflate(payload, expected: entry.uncompressedSize)
     }
 
-    private static func inflate(_ data: Data, expected: Int) -> Data? {
+    static func inflate(_ data: Data, expected: Int) -> Data? {
         guard !data.isEmpty else { return Data() }
         let capacity = max(expected, data.count * 6, 64 * 1024)
         var output = Data(count: capacity)
@@ -168,7 +168,7 @@ struct EPUBArchive {
                 .textContent.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let body = nodes.first { $0.tag == "body" }
 
-            var content = RuleEngine.htmlToText(body?.textContent ?? dom.textContent)
+            var content = HTMLParser.htmlToText(body?.textContent ?? dom.textContent)
             if !heading.isEmpty {
                 content = content.replacingOccurrences(of: heading, with: "", options: [], range: content.startIndex..<content.endIndex)
             }

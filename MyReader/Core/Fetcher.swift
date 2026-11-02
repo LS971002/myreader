@@ -1,11 +1,9 @@
 import Foundation
 
-/// 一次抓取的结果：保留原始文本 + 解析好的 DOM。
+/// 一次抓取的结果：保留原始文本。
 final class Page {
     let url: String
     let body: String
-    private(set) lazy var dom: HTMLNode = HTMLParser.parse(body)
-    private(set) lazy var engine: RuleEngine = RuleEngine(baseURL: url, raw: body)
 
     init(url: String, body: String) {
         self.url = url

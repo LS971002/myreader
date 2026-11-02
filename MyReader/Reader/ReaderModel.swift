@@ -119,14 +119,14 @@ final class ReaderModel: ObservableObject {
         }
         guard book.origin == .online else { return "" }
         guard let sourceID = book.sourceID,
-              let source = store.sources.first(where: { $0.id == sourceID }),
+              let source = store.source(id: sourceID),
               book.chapters.indices.contains(index) else {
             return ""
         }
         let chapter = book.chapters[index]
-        let engine = BookSourceEngine(source)
+        let engine = IBSEngine(source: source)
         do {
-            let text = try await engine.content(of: chapter)
+            let text = try await engine.content(chapter: chapter)
             if !text.isEmpty {
                 Paths.writeChapter(text, bookID: bookID, index: index)
             }

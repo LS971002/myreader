@@ -261,12 +261,14 @@ final class TTSController: NSObject, ObservableObject, AVSpeechSynthesizerDelega
         try? AVAudioSession.sharedInstance().setActive(true)
     }
 
-    func speak(_ text: String, rate: Double, pitch: Double, voiceIdentifier: String) {
+    func speak(_ text: String, rate: Float, pitch: Float, voiceIdentifier: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         synthesizer.stopSpeaking(at: .immediate)
         let utterance = AVSpeechUtterance(string: text)
-        utterance.rate = Float(max(0.1, min(0.9, rate)))
-        utterance.pitchMultiplier = Float(max(0.5, min(2.0, pitch)))
+        // 还原爱阅 JxdLocalTTS：语速恒等映射，音调 2p-0.5
+        utterance.rate = max(AVSpeechUtteranceMinimumSpeechRate,
+                             min(AVSpeechUtteranceMaximumSpeechRate, rate))
+        utterance.pitchMultiplier = max(0.5, min(1.5, pitch))
         if !voiceIdentifier.isEmpty, let voice = AVSpeechSynthesisVoice(identifier: voiceIdentifier) {
             utterance.voice = voice
         } else {
@@ -343,12 +345,12 @@ struct TTSBar: View {
             .foregroundStyle(Color.accentColor)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("语速 \(String(format: "%.2f", store.settings.ttsRate))")
+                Text("语速 \(Int(store.settings.ttsRatePercent))% / 音调 \(Int(store.settings.ttsPitchPercent))%")
                     .font(.caption).foregroundStyle(.secondary)
                 Slider(value: Binding(
-                    get: { store.settings.ttsRate },
-                    set: { v in store.updateSettings { $0.ttsRate = v } }
-                ), in: 0.1...0.9)
+                    get: { store.settings.ttsRatePercent },
+                    set: { v in store.updateSettings { $0.ttsRatePercent = v } }
+                ), in: 0...100, step: 1)
             }
 
             Toggle("读完自动翻页 / 下一章", isOn: $autoNext)
@@ -381,8 +383,7 @@ struct TTSBar: View {
                   rate: store.settings.ttsRate,
                   pitch: store.settings.ttsPitch,
                   voiceIdentifier: store.settings.ttsVoice)
-    }
-}
+    }}
 
 // MARK: - iOS 15 兼容的 sheet 高度
 

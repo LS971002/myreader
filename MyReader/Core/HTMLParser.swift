@@ -209,6 +209,21 @@ enum HTMLParser {
         return result
     }
 
+    /// HTML → 纯文本（保留段落换行，实体解码）。
+    static func htmlToText(_ html: String) -> String {
+        var text = html
+        text = text.replacingOccurrences(of: "<br\\s*/?>", with: "\n", options: .regularExpression)
+        text = text.replacingOccurrences(of: "</p>", with: "\n", options: .regularExpression)
+        text = text.replacingOccurrences(of: "</div>", with: "\n", options: .regularExpression)
+        text = text.replacingOccurrences(of: "</li>", with: "\n", options: .regularExpression)
+        text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        text = decodeEntities(text)
+        let lines = text.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return lines.joined(separator: "\n")
+    }
+
     static func decodeEntities(_ text: String) -> String {
         guard text.contains("&") else { return text }
         var out = text

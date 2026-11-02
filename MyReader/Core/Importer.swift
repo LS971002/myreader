@@ -1,28 +1,99 @@
 import Foundation
+import UniformTypeIdentifiers
 
-/// 本地文件导入：TXT / EPUB / 书源 JSON。全部落地到沙盒，可离线阅读。
+/// 本地文件导入：.ibs 书源 / 明文书源 JSON / TXT / EPUB。
 enum Importer {
     enum ImportError: LocalizedError {
         case unsupported
         case empty
         case read
+        case ibsParse(String)
 
         var errorDescription: String? {
             switch self {
-            case .unsupported: return "不支持的文件类型"
+            case .unsupported: return "不支持的文件类型（支持 .ibs / .txt / .epub / 书源 JSON）"
             case .empty: return "文件内容为空"
             case .read: return "读取文件失败"
+            case .ibsParse(let reason): return "ibs 解析失败：\(reason)"
             }
         }
     }
 
     static func handleIncoming(url: URL) {
         let ext = url.pathExtension.lowercased()
-        if ext == "json" {
+        switch ext {
+        case "ibs":
+            _ = try? importIBS(url: url)
+        case "json":
             _ = try? importBookSources(from: url)
-        } else {
+        default:
             _ = try? importBook(from: url)
         }
+    }
+
+    // MARK: - IBS 书源导入（核心）
+
+    /// .ibs 文件 → 解密 → 书源入库，返回导入数量。
+    @discardableResult
+    static func importIBS(from url: URL) throws -> Int {
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        let data = try Data(contentsOf: url)
+        return try importIBSData(data, fileName: url.lastPathComponent)
+    }
+
+    @discardableResult
+    static func importIBSData(_ data: Data, fileName: String = "书源.ibs") throws -> Int {
+        guard !data.isEmpty else { throw ImportError.empty }
+        let rawJSON: String
+        do {
+            rawJSON = try IBSCrypto.decryptFile(data)
+        } catch {
+            throw ImportError.ibsParse(error.localizedDescription)
+        }
+        return try importSourceJSON(rawJSON)
+    }
+
+    /// 解密后的书源 JSON（单对象或数组）入库。
+    @discardableResult
+    static func importSourceJSON(_ json: String) throws -> Int {
+        guard let data = json.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) else {
+            throw ImportError.ibsParse("书源 JSON 无效")
+        }
+        var list: [[String: Any]] = []
+        if let array = object as? [[String: Any]] {
+            list = array
+        } else if let dict = object as? [String: Any] {
+            list = [dict]
+        }
+        var sources: [IBSBookSource] = []
+        for item in list {
+            guard let itemData = try? JSONSerialization.data(withJSONObject: item),
+                  let raw = String(data: itemData, encoding: .utf8),
+                  let source = IBSBookSource.parse(rawJSON: raw) else { continue }
+            sources.append(source)
+        }
+        guard !sources.isEmpty else { throw ImportError.ibsParse("没有可用的书源") }
+        Store.shared.upsertSources(sources)
+        return sources.count
+    }
+
+    // MARK: - 明文 JSON 书源（兼容含 searchBook 节点的爱阅格式导出）
+
+    @discardableResult
+    static func importBookSources(from url: URL) throws -> Int {
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        let data = try Data(contentsOf: url)
+        guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) else {
+            throw ImportError.read
+        }
+        // 必须是含 IBS 规则节点的 JSON
+        guard text.contains("searchBook") || text.contains("sourceDetail") || text.contains("chapterDetail") else {
+            throw ImportError.unsupported
+        }
+        return try importSourceJSON(text)
     }
 
     // MARK: - 导入书籍
@@ -42,7 +113,6 @@ enum Importer {
         case "epub":
             return try importEPUB(data: data, name: url.deletingPathExtension().lastPathComponent)
         default:
-            // 没有扩展名时按文本处理
             return try importTXT(data: data, name: url.deletingPathExtension().lastPathComponent)
         }
     }
@@ -60,12 +130,10 @@ enum Importer {
             Chapter(index: index, title: item.title, url: "", cached: true, wordCount: item.content.count)
         }
 
-        // 正文落盘
         for (index, item) in chapters.enumerated() {
             Paths.writeChapter(item.content, bookID: book.id, index: index)
         }
 
-        // 备份原文件
         let copy = Paths.imported.appendingPathComponent("\(book.id.uuidString).txt")
         try? data.write(to: copy)
         book.localFile = Paths.relative(copy)
@@ -92,7 +160,7 @@ enum Importer {
         return book
     }
 
-    // MARK: - 切章
+    // MARK: - TXT 切章
 
     struct RawChapter {
         var title: String
@@ -136,7 +204,6 @@ enum Importer {
         }
         flush()
 
-        // 合并过短的章节（通常是误判的标题）
         var merged: [RawChapter] = []
         for chapter in chapters where !chapter.content.isEmpty {
             if let last = merged.last, last.content.count < 200 {
@@ -153,42 +220,5 @@ enum Importer {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
-    }
-
-    // MARK: - 导入书源
-
-    @discardableResult
-    static func importBookSources(from url: URL) throws -> Int {
-        let accessing = url.startAccessingSecurityScopedResource()
-        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-        let data = try Data(contentsOf: url)
-        let sources = try decodeSources(data)
-        Store.shared.upsertSources(sources)
-        return sources.count
-    }
-
-    static func decodeSources(_ data: Data) throws -> [BookSource] {
-        if let list = LenientJSON.decodeArray(BookSource.self, from: data, elementDefault: BookSource()) {
-            return list.map { fillID($0) }
-        }
-        // 兼容 {"sources": [...]} 或单个对象
-        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let array = object["sources"] as? [[String: Any]],
-               let arrayData = try? JSONSerialization.data(withJSONObject: array),
-               let list = LenientJSON.decodeArray(BookSource.self, from: arrayData,
-                                                  elementDefault: BookSource()) {
-                return list.map { fillID($0) }
-            }
-            if let single = LenientJSON.decode(BookSource.self, from: data, default: BookSource()) {
-                return [fillID(single)]
-            }
-        }
-        throw ImportError.unsupported
-    }
-
-    private static func fillID(_ source: BookSource) -> BookSource {
-        var copy = source
-        if copy.name.isEmpty { copy.name = "未命名书源" }
-        return copy
     }
 }

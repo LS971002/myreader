@@ -1,28 +1,34 @@
 import Foundation
 import Combine
 
-/// 全局数据仓库。使用 JSON + 文件系统持久化，简单、可读、方便备份。
+/// 全局数据仓库。JSON + 文件系统持久化。
+/// 书源以 SourceRecord（解密后的 IBS JSON 原文 + 元数据）落盘。
 final class Store: ObservableObject {
     static let shared = Store()
 
     @Published var books: [Book] = []
-    @Published var sources: [BookSource] = []
+    @Published var sourceRecords: [SourceRecord] = []
     @Published var groups: [BookGroup] = []
     @Published var bookmarks: [Bookmark] = []
     @Published var settings: AppSettings = AppSettings()
+
+    /// 解析后的书源（records 变更时重建）。
+    private(set) var sources: [IBSBookSource] = []
 
     private let io = DispatchQueue(label: "com.example.myreader.io")
     private var pendingSave: DispatchWorkItem?
 
     private init() {
         load()
+        reloadSources()
     }
 
     // MARK: - 载入 / 保存
 
     private func load() {
         books = loadArray(Book.self, elementDefault: Book(), at: Paths.booksJSON)
-        sources = loadArray(BookSource.self, elementDefault: BookSource(), at: Paths.sourcesJSON)
+        sourceRecords = loadArray(SourceRecord.self, elementDefault: SourceRecord(),
+                                  at: Paths.sourcesJSON)
         groups = loadArray(BookGroup.self, elementDefault: BookGroup(), at: Paths.groupsJSON)
         bookmarks = loadArray(Bookmark.self, elementDefault: Bookmark(), at: Paths.bookmarksJSON)
 
@@ -41,7 +47,6 @@ final class Store: ObservableObject {
         return LenientJSON.decodeArray(type, from: data, elementDefault: elementDefault) ?? []
     }
 
-    /// 合并短时间内的多次写入，避免频繁落盘。
     func save() {
         pendingSave?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -54,7 +59,7 @@ final class Store: ObservableObject {
 
     func flush() {
         let snapshot = (
-            json(books), json(sources), json(groups), json(bookmarks), json(settings)
+            json(books), json(sourceRecords), json(groups), json(bookmarks), json(settings)
         )
         io.async {
             try? snapshot.0?.write(to: Paths.booksJSON, options: .atomic)
@@ -71,6 +76,77 @@ final class Store: ObservableObject {
         return try? encoder.encode(value)
     }
 
+    // MARK: - 书源
+
+    func reloadSources() {
+        sources = sourceRecords.compactMap { $0.resolve() }
+    }
+
+    var enabledSources: [IBSBookSource] {
+        sources.filter { $0.enabled }.sorted { $0.weight > $1.weight }
+    }
+
+    func source(id: UUID) -> IBSBookSource? {
+        sources.first { $0.id == id }
+    }
+
+    /// 导入 / 更新书源（同名同 homeURL 视为更新，保留启用状态）。
+    func upsertSources(_ list: [IBSBookSource]) {
+        for source in list {
+            if let index = sourceRecords.firstIndex(where: {
+                $0.id == source.id
+                    || (recordName($0) == source.name && recordHome($0) == source.homeURL)
+            }) {
+                var record = SourceRecord.record(from: source)
+                record.id = sourceRecords[index].id
+                record.group = sourceRecords[index].group
+                record.enabled = sourceRecords[index].enabled
+                record.importedAt = Date()
+                sourceRecords[index] = record
+            } else {
+                sourceRecords.append(SourceRecord.record(from: source))
+            }
+        }
+        reloadSources()
+        save()
+    }
+
+    private func recordName(_ record: SourceRecord) -> String {
+        guard let data = record.rawJSON.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return ""
+        }
+        return (object["name"] as? String) ?? ""
+    }
+
+    private func recordHome(_ record: SourceRecord) -> String {
+        guard let data = record.rawJSON.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return ""
+        }
+        return (object["homeUrl"] as? String) ?? ""
+    }
+
+    func removeSource(_ source: IBSBookSource) {
+        sourceRecords.removeAll { $0.id == source.id }
+        reloadSources()
+        save()
+    }
+
+    func toggleSource(_ source: IBSBookSource) {
+        guard let index = sourceRecords.firstIndex(where: { $0.id == source.id }) else { return }
+        sourceRecords[index].enabled.toggle()
+        reloadSources()
+        save()
+    }
+
+    func setSourceEnabled(_ source: IBSBookSource, enabled: Bool) {
+        guard let index = sourceRecords.firstIndex(where: { $0.id == source.id }) else { return }
+        sourceRecords[index].enabled = enabled
+        reloadSources()
+        save()
+    }
+
     // MARK: - 书籍
 
     func book(id: UUID) -> Book? { books.first { $0.id == id } }
@@ -82,7 +158,9 @@ final class Store: ObservableObject {
     }
 
     func addBook(_ book: Book) {
-        if let idx = books.firstIndex(where: { $0.name == book.name && $0.author == book.author }) {
+        if let idx = books.firstIndex(where: {
+            $0.name == book.name && $0.author == book.author && $0.sourceID == book.sourceID
+        }) {
             books[idx].lastReadAt = Date()
         } else {
             books.insert(book, at: 0)
@@ -107,30 +185,6 @@ final class Store: ObservableObject {
         guard let idx = books.firstIndex(where: { $0.id == book.id }) else { return }
         books[idx].groupID = groupID
         save()
-    }
-
-    // MARK: - 书源
-
-    func upsertSources(_ list: [BookSource]) {
-        for source in list {
-            if let idx = sources.firstIndex(where: { $0.id == source.id }) {
-                sources[idx] = source
-            } else if let idx = sources.firstIndex(where: { $0.name == source.name && $0.baseURL == source.baseURL }) {
-                sources[idx] = source
-            } else {
-                sources.append(source)
-            }
-        }
-        save()
-    }
-
-    func removeSource(_ source: BookSource) {
-        sources.removeAll { $0.id == source.id }
-        save()
-    }
-
-    var enabledSources: [BookSource] {
-        sources.filter { $0.enabled }.sorted { $0.weight > $1.weight }
     }
 
     // MARK: - 分组
