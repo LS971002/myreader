@@ -157,7 +157,9 @@ final class HTTPClient {
         }
         guard offset < bytes.count - 8 else { return nil }
         let deflate = Data(bytes[offset..<(bytes.count - 8)])
-        return EPUBArchive.inflate(deflate, expected: bytes.count * 4)
+        // ZipReader.inflate = raw deflate 解压（Apple 的 COMPRESSION_ZLIB 实为无zlib头的raw deflate，
+        // 与 gzip payload 格式吻合）
+        return ZipReader.inflate(deflate, expected: bytes.count * 4)
     }
 
     /// 表单编码（保留字母数字与 -._~，其余 percent-encode）。
