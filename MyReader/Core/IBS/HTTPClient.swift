@@ -89,6 +89,10 @@ final class HTTPClient {
         // 默认 UA 先设，书源 / 脚本 UA 可覆盖
         request.setValue(Fetcher.userAgent, forHTTPHeaderField: "User-Agent")
         for (name, value) in headers {
+            // 剥离书源声明的 Accept-Encoding：URLSession 手动设置该头后不再自动解压，
+            // 服务器返回 gzip/br 会拿到乱码（00小说/错层/猫眼实测中招）；
+            // 让系统自动协商，响应永远走自动解压通道。
+            if name.caseInsensitiveCompare("Accept-Encoding") == .orderedSame { continue }
             request.setValue(value, forHTTPHeaderField: name)
         }
 
@@ -96,9 +100,19 @@ final class HTTPClient {
             request.httpShouldHandleCookies = false
         }
 
-        let (data, response) = try await session.data(for: request)
+        let (rawData, response) = try await session.data(for: request)
         if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
             throw HTTPError.http(http.statusCode)
+        }
+        // gzip 兜底解压（服务器无视协商仍压缩时；URLSession 手动设置过
+        // Accept-Encoding 的场景系统不解压，书源头已剥离，此处为二道防线）
+        let contentEncoding = (response as? HTTPURLResponse)?
+            .value(forHTTPHeaderField: "Content-Encoding")?.lowercased() ?? ""
+        let data: Data
+        if contentEncoding.contains("gzip") {
+            data = Self.gunzip(rawData) ?? rawData
+        } else {
+            data = rawData
         }
         guard !data.isEmpty else { throw HTTPError.empty }
 
@@ -117,6 +131,33 @@ final class HTTPClient {
         }
         return Response(finalURL: response.url?.absoluteString ?? requestURL,
                         text: text, headers: responseHeaders)
+    }
+
+    /// gzip 解压：解析 gzip 头（magic/标志位/可选字段）→ raw deflate 解压（复用 EPUB.inflate）。
+    static func gunzip(_ data: Data) -> Data? {
+        let bytes = [UInt8](data)
+        guard bytes.count > 18, bytes[0] == 0x1f, bytes[1] == 0x8b, bytes[2] == 8 else { return nil }
+        let flags = bytes[3]
+        var offset = 10
+        if flags & 0x04 != 0 {   // FEXTRA
+            guard offset + 2 <= bytes.count else { return nil }
+            let xlen = Int(bytes[offset]) | (Int(bytes[offset + 1]) << 8)
+            offset += 2 + xlen
+        }
+        if flags & 0x08 != 0 {   // FNAME（零结尾）
+            while offset < bytes.count && bytes[offset] != 0 { offset += 1 }
+            offset += 1
+        }
+        if flags & 0x10 != 0 {   // FCOMMENT（零结尾）
+            while offset < bytes.count && bytes[offset] != 0 { offset += 1 }
+            offset += 1
+        }
+        if flags & 0x02 != 0 {   // FHCRC
+            offset += 2
+        }
+        guard offset < bytes.count - 8 else { return nil }
+        let deflate = Data(bytes[offset..<(bytes.count - 8)])
+        return EPUB.inflate(deflate, expected: bytes.count * 4)
     }
 
     /// 表单编码（保留字母数字与 -._~，其余 percent-encode）。

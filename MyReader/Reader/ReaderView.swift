@@ -41,6 +41,8 @@ struct ReaderView: View {
                     pageContent(width: pageWidth)
                         .frame(width: contentSize.width, height: contentSize.height, alignment: .topLeading)
                         .clipped()
+                        // 菜单出现时正文缩放居中：完整可见，不被上下菜单遮挡
+                        .scaleEffect(menuScale(geo: geo), anchor: .center)
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, horizontal)
@@ -102,9 +104,9 @@ struct ReaderView: View {
                         let shouldTurn = dx < -pageWidth * 0.32 || velocity < -pageWidth * 0.6
                         let shouldBack = dx > pageWidth * 0.32 || velocity > pageWidth * 0.6
                         if shouldTurn {
-                            finishTurn(forward: true, width: pageWidth, followDrag: true)
+                            finishTurn(forward: true, width: pageWidth)
                         } else if shouldBack {
-                            finishTurn(forward: false, width: pageWidth, followDrag: true)
+                            finishTurn(forward: false, width: pageWidth)
                         } else {
                             // 回弹
                             withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
@@ -205,6 +207,15 @@ struct ReaderView: View {
         }
     }
 
+    /// 菜单可见时的正文缩放比例（让出上下菜单区，内容完整可见）。
+    private func menuScale(geo: GeometryProxy) -> CGFloat {
+        guard showMenu else { return 1 }
+        let menuTop: CGFloat = 56      // 顶部菜单条
+        let menuBottom: CGFloat = 86   // 底部按钮条
+        let available = geo.size.height - menuTop - menuBottom
+        return max(0.5, min(1, available / geo.size.height))
+    }
+
     private var currentPageText: String {
         model.pages.indices.contains(model.pageIndex) ? model.pages[model.pageIndex] : ""
     }
@@ -237,16 +248,15 @@ struct ReaderView: View {
 
     // MARK: - 翻页动画
 
-    /// 翻页完成动画。
-    /// - followDrag=true（手动拖拽）：邻页已跟手滑入占屏 → 单段滑出后提交并归零，
-    ///   无缝停留在新页（无第二段动画）。
-    /// - followDrag=false（点击翻页）：无跟手过程 → 滑出后瞬移对侧再滑入（两段）。
-    private func finishTurn(forward: Bool, width: CGFloat, followDrag: Bool = false) {
+    /// 翻页动画（点击与拖拽统一为单段）：
+    /// 动画期间当前页与邻页一起滑过屏（offset 达 ±width）→ 提交翻页 → 归零
+    /// （邻页此刻即为新当前页，无缝停留，无第二段动画）。
+    private func finishTurn(forward: Bool, width: CGFloat) {
         guard !isTurning else { return }
         isTurning = true
         let target: CGFloat = forward ? -width : width
 
-        // 章末/章首越界：翻的是章节（异步加载，不做两段滑入避免旧内容闪回）
+        // 章末/章首越界：翻的是章节（异步加载，直接归零避免旧内容闪回）
         let crossForward = forward && model.neighborNext == nil
         let crossBack = !forward && model.neighborPrev == nil
 
@@ -264,17 +274,8 @@ struct ReaderView: View {
                 dragOffset = 0
             } else {
                 if forward { model.nextPage() } else { model.prevPage() }
-                if followDrag {
-                    // 手动拖拽：提交后直接归零——刚才滑入的邻页此刻即为当前页，无缝停留
-                    dragOffset = 0
-                } else {
-                    // 点击：瞬移到对侧（无动画），新页滑入
-                    dragOffset = forward ? width : -width
-                    withAnimation(.spring(response: 0.30, dampingFraction: 1.0)) {
-                        dragOffset = 0
-                    }
-                    try? await Task.sleep(nanoseconds: 320_000_000)
-                }
+                // 提交后归零：滑入的邻页即新当前页
+                dragOffset = 0
             }
             isTurning = false
             // 冷却期：吸收同一次物理滑动的残余手势会话
