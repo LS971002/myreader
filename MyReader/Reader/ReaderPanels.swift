@@ -730,6 +730,8 @@ struct TTSPage: View {
     }
 
     /// 当前段：highlightRange 内的字高亮着色。
+    /// 注意：Text 拼接结果上 .foregroundStyle 会命中 Text 专属重载(iOS17+)，
+    /// 颜色一律用 .foregroundColor(iOS13+) 放在子段上。
     @ViewBuilder
     private var highlightedSegment: some View {
         let text = center.segments.indices.contains(center.currentSegment)
@@ -741,18 +743,18 @@ struct TTSPage: View {
            let swiftUpper = text.index(swiftLower, offsetBy: range.length,
                                         limitedBy: text.endIndex) {
             (Text(String(text[text.startIndex..<swiftLower]))
-                .foregroundStyle(theme.current.text)
+                .foregroundColor(theme.current.text)
             + Text(String(text[swiftLower..<swiftUpper]))
-                .foregroundStyle(Color.accentColor)
+                .foregroundColor(Color.accentColor)
                 .fontWeight(.medium)
             + Text(String(text[swiftUpper...]))
-                .foregroundStyle(theme.current.text))
+                .foregroundColor(theme.current.text))
             .font(.system(size: 17))
             .lineSpacing(6)
         } else {
             Text(text)
                 .font(.system(size: 17))
-                .foregroundStyle(theme.current.text)
+                .foregroundColor(theme.current.text)
                 .lineSpacing(6)
         }
     }
