@@ -12,6 +12,7 @@ struct ReaderView: View {
     @State private var showSettings = false
     @State private var showTTS = false
     @State private var dragOffset: CGFloat = 0
+    @State private var isTurning = false            // 翻页动画进行中（防重入）
 
     init(book: Book, store: Store) {
         _model = StateObject(wrappedValue: ReaderModel(store: store, book: book))
@@ -27,15 +28,15 @@ struct ReaderView: View {
                 width: geo.size.width - horizontal * 2,
                 height: geo.size.height - bottomInset - 30
             )
+            let pageWidth = geo.size.width
 
             ZStack {
                 theme.current.background.ignoresSafeArea()
 
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
-                    pageContent
+                    pageContent(width: pageWidth)
                         .frame(width: contentSize.width, height: contentSize.height, alignment: .topLeading)
-                        .offset(x: dragOffset)
                         .clipped()
                     Spacer(minLength: 0)
                 }
@@ -70,20 +71,30 @@ struct ReaderView: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        guard settings.pageTurn != .scroll else { return }
-                        dragOffset = value.translation.width
+                        guard settings.pageTurn != .scroll, !isTurning else { return }
+                        dragOffset = max(-width, min(width, value.translation.width))
                     }
                     .onEnded { value in
-                        let dx = value.translation.width
+                        guard settings.pageTurn != .scroll, !isTurning else { return }
+                        let dx = dragOffset
                         if abs(dx) < 12, abs(value.translation.height) < 12 {
                             handleTap(x: value.location.x, width: geo.size.width)
-                        } else if dx < -50 {
-                            withAnimation(.easeOut(duration: 0.2)) { model.nextPage() }
-                        } else if dx > 50 {
-                            withAnimation(.easeOut(duration: 0.2)) { model.prevPage() }
-                        }
-                        withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
                             dragOffset = 0
+                            return
+                        }
+                        // 速度加成：快速轻扫也翻页
+                        let velocity = value.predictedEndTranslation.width - value.translation.width
+                        let shouldTurn = dx < -pageWidth * 0.32 || velocity < -pageWidth * 0.6
+                        let shouldBack = dx > pageWidth * 0.32 || velocity > pageWidth * 0.6
+                        if shouldTurn {
+                            finishTurn(forward: true, width: pageWidth)
+                        } else if shouldBack {
+                            finishTurn(forward: false, width: pageWidth)
+                        } else {
+                            // 回弹
+                            withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                                dragOffset = 0
+                            }
                         }
                     }
             )
@@ -117,10 +128,10 @@ struct ReaderView: View {
         }
     }
 
-    // MARK: - 正文
+    // MARK: - 正文（双邻页跟手）
 
     @ViewBuilder
-    private var pageContent: some View {
+    private func pageContent(width: CGFloat) -> some View {
         if settings.pageTurn == .scroll {
             ScrollView(.vertical, showsIndicators: false) {
                 PageCanvas(text: model.pages.joined(separator: "\n"),
@@ -129,11 +140,129 @@ struct ReaderView: View {
                     .frame(width: nil)
             }
         } else {
-            PageCanvas(text: model.pages.indices.contains(model.pageIndex) ? model.pages[model.pageIndex] : "",
-                       settings: settings,
-                       theme: theme.current)
+            ZStack(alignment: .topLeading) {
+                // 左邻页（章内上一页 / 上一章末页）
+                neighborPage(edge: .leading, width: width)
+
+                // 右邻页（章内下一页 / 下一章首页）
+                neighborPage(edge: .trailing, width: width)
+
+                // 当前页
+                PageCanvas(text: currentPageText,
+                           settings: settings,
+                           theme: theme.current)
+                    .offset(x: dragOffset)
+                    .id(model.book.currentChapter * 100_000 + model.pageIndex)
+                    .transition(.opacity)
+            }
+            .allowsHitTesting(false)
         }
     }
+
+    @ViewBuilder
+    private func neighborPage(edge: Edge, width: CGFloat) -> some View {
+        let isLeading = edge == .leading
+        let offsetBase: CGFloat = isLeading ? -width : width
+
+        if isLeading {
+            if let text = model.neighborPrev {
+                PageCanvas(text: text, settings: settings, theme: theme.current)
+                    .offset(x: offsetBase + dragOffset)
+            } else if let chapter = model.neighborChapterPrev {
+                PageCanvas(text: chapter.text, settings: settings, theme: theme.current)
+                    .overlay(alignment: .top) {
+                        chapterHint("上一章 · \(chapter.title)")
+                    }
+                    .offset(x: offsetBase + dragOffset)
+            } else if let title = model.chapterTitlePrev {
+                chapterPlaceholder("上一章", title: title)
+                    .offset(x: offsetBase + dragOffset)
+            }
+        } else {
+            if let text = model.neighborNext {
+                PageCanvas(text: text, settings: settings, theme: theme.current)
+                    .offset(x: offsetBase + dragOffset)
+            } else if let chapter = model.neighborChapterNext {
+                PageCanvas(text: chapter.text, settings: settings, theme: theme.current)
+                    .overlay(alignment: .top) {
+                        chapterHint("下一章 · \(chapter.title)")
+                    }
+                    .offset(x: offsetBase + dragOffset)
+            } else if let title = model.chapterTitleNext {
+                chapterPlaceholder("下一章", title: title)
+                    .offset(x: offsetBase + dragOffset)
+            }
+        }
+    }
+
+    private var currentPageText: String {
+        model.pages.indices.contains(model.pageIndex) ? model.pages[model.pageIndex] : ""
+    }
+
+    private func chapterHint(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(theme.current.secondary)
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(theme.current.background.opacity(0.9), in: Capsule())
+            .padding(.top, -26)
+    }
+
+    private func chapterPlaceholder(_ label: String, title: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: label == "上一章" ? "chevron.up" : "chevron.down")
+                .font(.title2)
+                .foregroundStyle(theme.current.secondary)
+            Text("\(label)：\(title)")
+                .font(.subheadline)
+                .foregroundStyle(theme.current.secondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+            Text("松手进入")
+                .font(.caption2)
+                .foregroundStyle(theme.current.secondary.opacity(0.6))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - 翻页动画
+
+    /// 拖拽已越界 → 动画滑完 → 提交翻页 → 新页从对侧滑入。
+    private func finishTurn(forward: Bool, width: CGFloat) {
+        guard !isTurning else { return }
+        isTurning = true
+        let target: CGFloat = forward ? -width : width
+
+        // 章末/章首越界：翻的是章节（异步加载，不做两段滑入避免旧内容闪回）
+        let crossForward = forward && model.neighborNext == nil
+        let crossBack = !forward && model.neighborPrev == nil
+
+        withAnimation(.spring(response: 0.30, dampingFraction: 1.0)) {
+            dragOffset = target
+        }
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if crossForward {
+                model.goNextChapter()
+                dragOffset = 0
+            } else if crossBack {
+                model.goPreviousChapter()
+                dragOffset = 0
+            } else {
+                if forward { model.nextPage() } else { model.prevPage() }
+                // 瞬移到对侧（无动画），新页滑入
+                dragOffset = forward ? width : -width
+                withAnimation(.spring(response: 0.30, dampingFraction: 1.0)) {
+                    dragOffset = 0
+                }
+                try? await Task.sleep(nanoseconds: 320_000_000)
+            }
+            isTurning = false
+        }
+    }
+
+    // MARK: - 状态栏
 
     private var statusBar: some View {
         VStack {
@@ -225,11 +354,15 @@ struct ReaderView: View {
             withAnimation { showMenu = false }
             return
         }
+        guard settings.tapToTurn else {
+            withAnimation { showMenu = true }
+            return
+        }
         let third = width / 3
         if x < third {
-            withAnimation(.easeOut(duration: 0.2)) { model.prevPage() }
+            finishTurn(forward: false, width: width)
         } else if x > width - third {
-            withAnimation(.easeOut(duration: 0.2)) { model.nextPage() }
+            finishTurn(forward: true, width: width)
         } else {
             withAnimation { showMenu = true }
         }

@@ -11,6 +11,8 @@ final class ReaderModel: ObservableObject {
     @Published var pageIndex: Int = 0
     @Published var loading = false
     @Published var errorMessage: String?
+    /// 上一次章节跳转方向（跨章过渡动画方向）。
+    @Published var lastJumpForward = true
 
     private var pageCache: [Int: [String]] = [:]
     private var size: CGSize = .zero
@@ -171,20 +173,67 @@ final class ReaderModel: ObservableObject {
         }
     }
 
+    // MARK: - 邻页（双页跟手翻页）
+
+    /// 左侧邻页文本：章内上一页；处于章首页时为 nil（跨章交给占位卡）。
+    var neighborPrev: String? {
+        guard pageIndex > 0 else { return nil }
+        return pages.indices.contains(pageIndex - 1) ? pages[pageIndex - 1] : nil
+    }
+
+    /// 右侧邻页文本：章内下一页；处于章末页时为 nil。
+    var neighborNext: String? {
+        guard pageIndex + 1 < pages.count else { return nil }
+        return pages[pageIndex + 1]
+    }
+
+    /// 章节占位：左侧（上一章末页，若已缓存分页则给真实内容）。
+    var neighborChapterPrev: (title: String, text: String)? {
+        let prev = book.currentChapter - 1
+        guard book.chapters.indices.contains(prev) else { return nil }
+        if let cached = pageCache[prev], let last = cached.last, !last.isEmpty {
+            return (book.chapters[prev].title, last)
+        }
+        return nil
+    }
+
+    /// 章节占位：右侧（下一章首页，若已缓存分页则给真实内容）。
+    var neighborChapterNext: (title: String, text: String)? {
+        let next = book.currentChapter + 1
+        guard book.chapters.indices.contains(next) else { return nil }
+        if let cached = pageCache[next], let first = cached.first, !first.isEmpty {
+            return (book.chapters[next].title, first)
+        }
+        return nil
+    }
+
+    var chapterTitlePrev: String? {
+        let prev = book.currentChapter - 1
+        return book.chapters.indices.contains(prev) ? book.chapters[prev].title : nil
+    }
+
+    var chapterTitleNext: String? {
+        let next = book.currentChapter + 1
+        return book.chapters.indices.contains(next) ? book.chapters[next].title : nil
+    }
+
     func goNextChapter() {
         let next = book.currentChapter + 1
         guard book.chapters.indices.contains(next) else { return }
+        lastJumpForward = true
         Task { await load(chapterIndex: next, targetPage: 0) }
     }
 
     func goPreviousChapter() {
         let prev = book.currentChapter - 1
         guard book.chapters.indices.contains(prev) else { return }
+        lastJumpForward = false
         Task { await load(chapterIndex: prev, useLastPage: true) }
     }
 
     func jump(to chapter: Int) {
         guard book.chapters.indices.contains(chapter) else { return }
+        lastJumpForward = chapter > book.currentChapter
         Task { await load(chapterIndex: chapter, targetPage: 0) }
     }
 

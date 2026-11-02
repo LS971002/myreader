@@ -13,6 +13,8 @@ struct ShelfView: View {
     @State private var searchText = ""
     @State private var detailBook: Book?
     @State private var cacheBook: Book?
+    /// 全屏阅读（fullScreenCover：无 TabBar 遮挡）。
+    @State private var readingBook: Book?
 
     private var books: [Book] {
         var list = store.books
@@ -40,9 +42,9 @@ struct ShelfView: View {
                     ScrollView {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 18)], spacing: 22) {
                             ForEach(books) { book in
-                                NavigationLink(destination: ReaderView(book: book, store: store)
-                                    .environmentObject(store)
-                                    .environmentObject(theme)) {
+                                Button {
+                                    readingBook = book
+                                } label: {
                                     BookCell(book: book)
                                 }
                                 .buttonStyle(.plain)
@@ -132,6 +134,11 @@ struct ShelfView: View {
             .sheet(item: $cacheBook) { book in
                 CacheSheet(book: book)
                     .environmentObject(store)
+            }
+            .fullScreenCover(item: $readingBook) { book in
+                ReaderView(book: book, store: store)
+                    .environmentObject(store)
+                    .environmentObject(theme)
             }
         }
         .navigationViewStyle(.stack)

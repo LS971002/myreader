@@ -138,11 +138,16 @@ enum IBSCrypto {
                 ?? Data()  // 解压失败给空
         }
 
+        // WinZip AES 规范：salt 长度与 key 长度是独立数值
+        //   strength 1 = AES-128: salt 8B,  key 16B
+        //   strength 2 = AES-192: salt 12B, key 24B
+        //   strength 3 = AES-256: salt 16B, key 32B（派生 2*32+2 = 66B）
+        let keyLength: Int
         let saltLength: Int
         switch entry.aesStrength {
-        case 1: saltLength = 16
-        case 2: saltLength = 24
-        default: saltLength = 32
+        case 1: keyLength = 16; saltLength = 8
+        case 2: keyLength = 24; saltLength = 12
+        default: keyLength = 32; saltLength = 16
         }
 
         // local header 后：extra（同样含 0x9901）→ salt → pwcheck → 密文 → HMAC
@@ -159,8 +164,7 @@ enum IBSCrypto {
         let ciphertext = Data(bytes[(dataStart + saltLength + 2)..<cipherEnd])
         let hmacStored = Data(bytes[cipherEnd..<min(cipherEnd + 10, bytes.count)])
 
-        // PBKDF2-HMAC-SHA1 ×1000 → 2*keyLen + 2 字节
-        let keyLength = saltLength
+        // PBKDF2-HMAC-SHA1 ×1000 → keyLen + 2B pwcheck + macKeyLen
         let derivedLength = keyLength * 2 + 2
         var derived = Data(count: derivedLength)
         let pwData = password.data(using: .utf8) ?? Data()
