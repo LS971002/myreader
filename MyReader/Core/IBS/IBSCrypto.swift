@@ -300,24 +300,60 @@ enum IBSCrypto {
 
     /// configs.json → 书源 JSON 明文字符串。
     static func decryptConfigs(_ configsData: Data) throws -> String {
-        guard let object = (try? JSONSerialization.jsonObject(with: configsData)) as? [[String: Any]],
-              let item = object.first,
-              let passwordB64 = item["_passwordConfigs"] as? String,
-              let encodeB64 = item["_encodeConfigs"] as? String,
-              let passwordBytes = Data(base64Encoded: passwordB64),
-              let encodeBytes = Data(base64Encoded: encodeB64) else {
+        guard let object = try? JSONSerialization.jsonObject(with: configsData) else {
             throw IBSError.missingFields
         }
 
-        // 第一层：全零 key（原 App getCString maxLength=33 溢出 bug 的精确复刻）
-        let real = unpad(aesECBDecrypt(passwordBytes, key: Data(repeating: 0, count: 16)))
-        guard let realString = String(data: real, encoding: .utf8) else { throw IBSError.decryptFailed }
+        // 收集所有书源 dict：
+        // - 外层数组：每个元素独立处理（多书源ibs=多个密码层包，Python已实测7书源文件）
+        // - 元素是密码层包({_passwordConfigs,_encodeConfigs}) → 解密；内层可能是 dict 或 array
+        // - 元素直接是书源 dict（明文）→ 直接收集
+        // - 外层是单个 dict（码字阅读变体：整体一个密码层包）
+        var collected: [[String: Any]] = []
 
-        // 第二层：key = MD5(realString) 小写 hex 前 16 字符（ASCII）
-        let md5hex = md5(realString.data(using: .utf8) ?? real)
-        let key2 = String(md5hex.prefix(16)).data(using: .ascii) ?? Data()
-        let plain = unpad(aesECBDecrypt(encodeBytes, key: key2))
-        guard let json = String(data: plain, encoding: .utf8), json.hasPrefix("{") else {
+        func decryptElement(_ item: [String: Any]) throws -> Void {
+            guard let passwordB64 = item["_passwordConfigs"] as? String,
+                  let encodeB64 = item["_encodeConfigs"] as? String,
+                  let passwordBytes = Data(base64Encoded: passwordB64),
+                  let encodeBytes = Data(base64Encoded: encodeB64) else {
+                // 非密码层包：若像书源则直接收集
+                if item.keys.contains(where: { $0 == "searchBook" || $0 == "sourceDetail" || $0 == "name" }) {
+                    collected.append(item)
+                }
+                return
+            }
+            // 第一层：全零 key（原 App getCString maxLength=33 溢出 bug 的精确复刻）
+            let real = unpad(aesECBDecrypt(passwordBytes, key: Data(repeating: 0, count: 16)))
+            guard let realString = String(data: real, encoding: .utf8) else {
+                throw IBSError.decryptFailed
+            }
+            // 第二层：key = MD5(realString) 小写 hex 前 16 字符（ASCII）
+            let md5hex = md5(realString.data(using: .utf8) ?? real)
+            let key2 = String(md5hex.prefix(16)).data(using: .ascii) ?? Data()
+            let plain = unpad(aesECBDecrypt(encodeBytes, key: key2))
+            guard let json = String(data: plain, encoding: .utf8),
+                  let inner = try? JSONSerialization.jsonObject(with: json.data(using: .utf8) ?? Data()) else {
+                throw IBSError.decryptFailed
+            }
+            if let dict = inner as? [String: Any] {
+                collected.append(dict)
+            } else if let array = inner as? [[String: Any]] {
+                collected.append(contentsOf: array)
+            }
+        }
+
+        if let array = object as? [[String: Any]] {
+            for item in array {
+                try decryptElement(item)
+            }
+        } else if let dict = object as? [String: Any] {
+            try decryptElement(dict)
+        }
+
+        guard !collected.isEmpty else { throw IBSError.missingFields }
+        // 合并为 JSON 数组返回（importSourceJSON 已支持数组）
+        let merged = try JSONSerialization.data(withJSONObject: collected, options: [])
+        guard let json = String(data: merged, encoding: .utf8) else {
             throw IBSError.decryptFailed
         }
         return json
