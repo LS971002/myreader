@@ -238,13 +238,19 @@ final class RuleRunner {
 // MARK: - JSON 路径（自旧引擎迁移）
 
 enum JSONRule {
-    /// `data.books` → 原始对象/数组项列表（搜索 _list 用：保留 dict/array 形态）。
+    /// `data.books` → 原始对象/数组项列表（搜索 _list 用：保留 dict 形态）。
+    /// 路径终点的数组会被展平为元素列表（日志实锤：七猫 data.books 曾把
+    /// 整个数组当单个值返回，列表项=1 且字段解析失败）。
     static func objectArray(_ path: String, in text: String) -> [Any] {
         guard
             let data = text.data(using: .utf8),
             let object = try? JSONSerialization.jsonObject(with: data)
         else { return [] }
-        return pathValues(path, roots: [object])
+        let values = pathValues(path, roots: [object])
+        if values.count == 1, let array = values.first as? [Any] {
+            return array
+        }
+        return values
     }
 
     /// `data.books[0].title`、`a.b[*].c` → 字符串值列表

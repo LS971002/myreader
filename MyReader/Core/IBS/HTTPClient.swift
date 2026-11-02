@@ -72,7 +72,15 @@ final class HTTPClient {
                 requestURL = components.url?.absoluteString ?? url
             }
         }
-        guard let urlObject = URL(string: requestURL) else { throw HTTPError.badURL }
+        let urlObject: URL
+        if let direct = URL(string: requestURL) {
+            urlObject = direct
+        } else if let comps = URLComponents(string: requestURL), let encoded = comps.url {
+            // 含未编码中文等字符：URLComponents 自动编码 path/query
+            urlObject = encoded
+        } else {
+            throw HTTPError.badURL
+        }
 
         var request = URLRequest(url: urlObject)
         request.httpMethod = isPost ? "POST" : "GET"
@@ -190,6 +198,9 @@ final class HTTPClient {
     }
 
     /// 相对 URL → 绝对（基于书源 homeURL 或当前页）。
+    /// 注意双重编码陷阱（日志实锤）：URLComponents.path setter 期望未编码值，
+    /// 对已含 % 序列的路径会把 % 再编码成 %25（错层 /book/so/%E6... → %25E6... → 401）。
+    /// 已编码路径用 percentEncodedPath 赋值；未编码（含中文）用 path 自动编码。
     static func absolute(_ link: String, base: String) -> String {
         let v = link.trimmingCharacters(in: .whitespacesAndNewlines)
         if v.isEmpty { return "" }
@@ -198,7 +209,11 @@ final class HTTPClient {
         guard let baseURL = URL(string: base) else { return v }
         if v.hasPrefix("/") {
             var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
-            comps?.path = v
+            if v.range(of: "%[0-9A-Fa-f]{2}", options: .regularExpression) != nil {
+                comps?.percentEncodedPath = v
+            } else {
+                comps?.path = v
+            }
             comps?.query = nil
             return comps?.url?.absoluteString ?? v
         }

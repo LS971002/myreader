@@ -22,28 +22,37 @@ struct CatalogSheet: View {
 
     var body: some View {
         NavigationView {
-            List {
-                ForEach(chapters) { chapter in
-                    Button {
-                        model.jump(to: chapter.index)
-                        dismiss()
-                    } label: {
-                        HStack {
-                            Text(chapter.title)
-                                .font(.subheadline)
-                                .foregroundStyle(chapter.index == model.book.currentChapter ? Color.accentColor : Color.primary)
-                                .lineLimit(1)
-                            Spacer()
-                            if chapter.cached {
-                                Image(systemName: "arrow.down.circle.fill")
-                                    .font(.caption2)
-                                    .foregroundStyle(.green.opacity(0.7))
+            ScrollViewReader { proxy in
+                List {
+                    ForEach(chapters) { chapter in
+                        Button {
+                            model.jump(to: chapter.index)
+                            dismiss()
+                        } label: {
+                            HStack {
+                                Text(chapter.title)
+                                    .font(.subheadline)
+                                    .foregroundStyle(chapter.index == model.book.currentChapter ? Color.accentColor : Color.primary)
+                                    .lineLimit(1)
+                                Spacer()
+                                if chapter.cached {
+                                    Image(systemName: "arrow.down.circle.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(.green.opacity(0.7))
+                                }
                             }
                         }
+                        .id(chapter.index)
+                    }
+                }
+                .searchable(text: $query, prompt: "搜索章节")
+                .onAppear {
+                    // 自动定位当前章节到屏幕中心
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        proxy.scrollTo(model.book.currentChapter, anchor: .center)
                     }
                 }
             }
-            .searchable(text: $query, prompt: "搜索章节")
             .navigationTitle("目录（\(model.book.chapters.count)）")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
