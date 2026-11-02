@@ -20,6 +20,9 @@ enum BookActions {
         if let chapters = try? await engine.directory(link: result.link) {
             book.chapters = chapters
         }
+        if book.chapters.isEmpty {
+            AppLog.warn("ADD", "《\(book.name.prefix(16))》目录0章（link=\(result.link.prefix(60))）——阅读将为空白")
+        }
         // 详情（bookDetail 为空时保持搜索结果字段）
         if let (intro, cover) = try? await engine.detail(link: result.link) {
             if book.intro.isEmpty { book.intro = intro }
@@ -98,17 +101,19 @@ enum BookActions {
         }
         updated.detailURL = match.link
         let chapters = try await engine.directory(link: match.link)
-        if !chapters.isEmpty {
-            // 保留已缓存标记（索引对得上的章节直接复用旧缓存正文）
-            updated.chapters = chapters.map { chapter in
-                var copy = chapter
-                copy.cached = Paths.readChapter(bookID: book.id, index: chapter.index) != nil
-                return copy
-            }
-            // 进度保护：定位到同章节
-            updated.currentChapter = min(book.currentChapter, max(0, chapters.count - 1))
-            updated.currentPage = 0
+        guard !chapters.isEmpty else {
+            AppLog.error("SOURCE", "换源失败：新源目录解析0章（detailURL=\(match.link.prefix(60))）")
+            throw BookSourceEngineError.directoryFailed
         }
+        // 保留已缓存标记（索引对得上的章节直接复用旧缓存正文）
+        updated.chapters = chapters.map { chapter in
+            var copy = chapter
+            copy.cached = Paths.readChapter(bookID: book.id, index: chapter.index) != nil
+            return copy
+        }
+        // 进度保护：定位到同章节
+        updated.currentChapter = min(book.currentChapter, max(0, chapters.count - 1))
+        updated.currentPage = 0
         store.updateBook(updated)
         AppLog.info("SOURCE", "换源完成：\(chapters.count)章，当前第\(updated.currentChapter + 1)章")
         return updated
@@ -131,10 +136,12 @@ enum BookActions {
 
 enum BookSourceEngineError: LocalizedError {
     case missingSource
+    case directoryFailed
 
     var errorDescription: String? {
         switch self {
         case .missingSource: return "书源已被删除"
+        case .directoryFailed: return "新源目录解析失败（0章），已保留原书源"
         }
     }
 }

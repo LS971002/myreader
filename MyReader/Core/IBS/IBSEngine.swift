@@ -90,6 +90,9 @@ final class IBSEngine {
 
             let dirURL = runFieldOn(runner, parser: step.parser, name: "dirURL",
                                     input: entry.input, node: entry.node) ?? ""
+            if dirURL.isEmpty {
+                AppLog.warn("SEARCH", "〔\(source.name)〕《\(title.prefix(16))》dirURL为空(规则: \(fieldRules(step.parser, "dirURL")?.first?.prefix(50) ?? "-"))，link兜底为搜索URL")
+            }
             let link = dirURL.isEmpty ? step.finalURL
                 : HTTPClient.absolute(dirURL, base: step.finalURL.isEmpty ? source.homeURL : step.finalURL)
             let author = runFieldOn(runner, parser: step.parser, name: "author",

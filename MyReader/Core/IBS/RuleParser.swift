@@ -78,6 +78,25 @@ final class RuleRunner {
             return values.first
         }
 
+        // ⚠️ JSON 项上下文必须先于选择器分支：
+        // 猫眼 dirURL "/novel/{{$.novelId}}/chapters" 含 "." 会被 looksLikeSelector
+        // 误判成选择器导致 dirURL 恒空 → link 兜底成搜索URL → 目录0章 → 正文空白。
+        // JSON 项字段（无前缀键简写 / {{$.path}} 模板）优先于选择器。
+        if hasJSONContext(input) && !trimmed.hasPrefix("@ex:") && !trimmed.hasPrefix("@xpath:") {
+            if trimmed.contains("{{") {
+                let expanded = expandJSONTemplate(stripQuotes(trimmed), input: input)
+                if !expanded.isEmpty { return expanded }
+            }
+            if isPlainPath(trimmed), !trimmed.contains(" "),
+               let value = JSONRule.path(trimmed, in: input).first, !value.isEmpty {
+                return value
+            }
+            // JSON 上下文里选择器没有意义（输入不是HTML），直接按字面量返回
+            if !looksLikeSelector(trimmed) {
+                return stripQuotes(trimmed)
+            }
+        }
+
         // @ex: / 无前缀 —— XPath 选择器
         var selectorText = trimmed
         if trimmed.hasPrefix("@ex:") {
@@ -99,20 +118,7 @@ final class RuleRunner {
             return value?.isEmpty == true ? nil : value
         }
 
-        // 兜底：纯文本（type 0）
-        // JSON 项上下文增强（猫眼API形态）：
-        //   - 无前缀短词 → JSON 键/点路径求值（bookName: "novelName"）
-        //   - {{$.path}} 模板 → JSON 取值插值（dirURL: "\"/novel/{{$.novelId}}/chapters\""，剥首尾引号）
-        if hasJSONContext(input) {
-            if trimmed.contains("{{") {
-                let expanded = expandJSONTemplate(stripQuotes(trimmed), input: input)
-                if !expanded.isEmpty { return expanded }
-            }
-            if isPlainPath(trimmed), !trimmed.contains(" "),
-               let value = JSONRule.path(trimmed, in: input).first, !value.isEmpty {
-                return value
-            }
-        }
+        // 兜底：纯文本（type 0）直接返回
         return trimmed
     }
 
