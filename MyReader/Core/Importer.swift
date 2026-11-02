@@ -392,10 +392,12 @@ enum Importer {
     @discardableResult
     static func importIBSData(_ data: Data, fileName: String = "书源.ibs") throws -> Int {
         guard !data.isEmpty else { throw ImportError.empty }
+        AppLog.info("IMPORT", "导入ibs：\(fileName) (\(data.count)B)")
         let rawJSON: String
         do {
             rawJSON = try IBSCrypto.decryptFile(data)
         } catch {
+            AppLog.error("IMPORT", "ibs解密失败：\(error.localizedDescription)")
             throw ImportError.ibsParse(error.localizedDescription)
         }
         return try importSourceJSON(rawJSON)
@@ -422,6 +424,7 @@ enum Importer {
             sources.append(source)
         }
         guard !sources.isEmpty else { throw ImportError.ibsParse("没有可用的书源") }
+        AppLog.info("IMPORT", "书源入库：\(sources.count)个 (\(sources.map(\.name).joined(separator: "、").prefix(120)))")
         Store.shared.upsertSources(sources)
         return sources.count
     }

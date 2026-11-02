@@ -77,6 +77,35 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Button {
+                        let url = AppLog.shared.exportFileURL()
+                        exported = url
+                    } label: {
+                        Label("导出诊断日志", systemImage: "doc.text.magnifyingglass")
+                    }
+                    Button(role: .destructive) {
+                        let removed = AppLog.shared.clearAll()
+                        message = removed > 0 ? "已清理 \(removed) 个日志文件" : "日志已清空"
+                    } label: {
+                        Text("清空日志")
+                    }
+                    NavigationLink(destination: LogViewerView()) {
+                        HStack {
+                            Label("查看日志", systemImage: "terminal")
+                            Spacer()
+                            let stat = AppLog.shared.stat()
+                            Text("\(stat.entries)条/\(stat.files)文件")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                } header: {
+                    Text("诊断日志")
+                } footer: {
+                    Text("日志自动保留7天并限额5MB/天。遇到功能异常时导出发给开发者即可定位。")
+                        .font(.caption2)
+                }
+
+                Section {
                     HStack {
                         Text("版本")
                         Spacer()
@@ -154,6 +183,61 @@ struct ShareSheet: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
+
+// MARK: - 日志查看器
+
+/// 最近日志实时列表（内存缓冲尾部，倒序显示）。
+struct LogViewerView: View {
+    @State private var entries: [AppLog.Entry] = []
+    @State private var refreshTimer: Timer?
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                ForEach(entries) { entry in
+                    HStack(alignment: .top, spacing: 6) {
+                        Text(AppLog.stampText(entry))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 86, alignment: .leading)
+                        Text(entry.tag)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(color(entry.level))
+                            .frame(width: 56, alignment: .leading)
+                        Text(entry.message)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.primary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(.horizontal, 8)
+                }
+            }
+            .padding(.vertical, 8)
+        }
+        .background(Color(.systemBackground))
+        .navigationTitle("日志（最近\(entries.count)条）")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            entries = AppLog.shared.buffer.reversed()
+            refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
+                entries = AppLog.shared.buffer.reversed()
+            }
+        }
+        .onDisappear {
+            refreshTimer?.invalidate()
+            refreshTimer = nil
+        }
+    }
+
+    private func color(_ level: AppLog.Level) -> Color {
+        switch level {
+        case .debug: return .secondary
+        case .info: return .blue
+        case .warn: return .orange
+        case .error: return .red
+        }
+    }
 }
 
 // MARK: - 主题与排版

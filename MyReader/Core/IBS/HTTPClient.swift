@@ -100,8 +100,16 @@ final class HTTPClient {
             request.httpShouldHandleCookies = false
         }
 
+        AppLog.debug("HTTP", "→ \(request.httpMethod ?? "GET") \(requestURL)")
+        if !headers.isEmpty {
+            let keys = headers.keys.sorted().joined(separator: ",")
+            AppLog.debug("HTTP", "  头: [\(keys)]")
+        }
+        let started = Date()
         let (rawData, response) = try await session.data(for: request)
+        let elapsed = Int(Date().timeIntervalSince(started) * 1000)
         if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+            AppLog.error("HTTP", "✗ \(requestURL) → \(http.statusCode) (\(elapsed)ms, \(rawData.count)B)")
             throw HTTPError.http(http.statusCode)
         }
         // gzip 兜底解压（服务器无视协商仍压缩时；URLSession 手动设置过
@@ -111,15 +119,23 @@ final class HTTPClient {
         let data: Data
         if contentEncoding.contains("gzip") {
             data = Self.gunzip(rawData) ?? rawData
+            AppLog.warn("HTTP", "  gzip兜底解压: 输入\(rawData.count)B → 输出\(data.count)B")
         } else {
             data = rawData
         }
-        guard !data.isEmpty else { throw HTTPError.empty }
+        guard !data.isEmpty else {
+            AppLog.error("HTTP", "✗ \(requestURL) → 空响应 (\(elapsed)ms)")
+            throw HTTPError.empty
+        }
 
         let headerCharset = (response as? HTTPURLResponse)?
             .value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
         let text = Fetcher.decode(data: data, hint: "utf-8", header: headerCharset) ?? ""
-        guard !text.isEmpty else { throw HTTPError.decode }
+        AppLog.info("HTTP", "✓ \(requestURL) → \(data.count)B \(elapsed)ms 编码=\(headerCharset.isEmpty ? "utf8" : headerCharset) 文本长度=\(text.count)")
+        guard !text.isEmpty else {
+            AppLog.error("HTTP", "✗ \(requestURL) → 解码失败 (首字节=\(data.prefix(4).map { String(format: "%02x", $0) }.joined()))")
+            throw HTTPError.decode
+        }
 
         var responseHeaders: [String: String] = [:]
         if let http = response as? HTTPURLResponse {

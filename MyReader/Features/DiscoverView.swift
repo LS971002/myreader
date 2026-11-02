@@ -11,6 +11,8 @@ struct DiscoverView: View {
     @State private var expandedGroup: UUID?
     /// 最近一次搜索的词（区分"未搜索"与"搜完无结果"两种空态）。
     @State private var lastSearched: String?
+    /// 导出日志文件（分享面板）。
+    @State private var exportedLog: URL?
 
     var body: some View {
         NavigationView {
@@ -42,6 +44,12 @@ struct DiscoverView: View {
             .sheet(isPresented: $showSourceList) {
                 BookSourceListView()
                     .environmentObject(store)
+            }
+            .sheet(item: Binding(
+                get: { exportedLog.map { ExportItem(url: $0) } },
+                set: { exportedLog = $0?.url }
+            )) { item in
+                ShareSheet(items: [item.url])
             }
             .overlay(alignment: .bottom) {
                 if let message = addedMessage {
@@ -124,6 +132,14 @@ struct DiscoverView: View {
                 }
                 .padding(.top, 6)
             }
+            Button {
+                exportedLog = AppLog.shared.exportFileURL()
+            } label: {
+                Label("导出诊断日志", systemImage: "doc.text.magnifyingglass")
+                    .font(.footnote)
+            }
+            .buttonStyle(.bordered)
+            .padding(.top, 10)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

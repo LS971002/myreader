@@ -128,12 +128,16 @@ final class ReaderModel: ObservableObject {
         let chapter = book.chapters[index]
         let engine = IBSEngine(source: source)
         do {
+            AppLog.debug("READER", "取章节[\(index)] \(chapter.title.prefix(20))（源:\(source.name)）")
             let text = try await engine.content(chapter: chapter)
             if !text.isEmpty {
                 Paths.writeChapter(text, bookID: bookID, index: index)
+            } else {
+                AppLog.warn("READER", "章节[\(index)]内容为空")
             }
             return text
         } catch {
+            AppLog.error("READER", "章节[\(index)]获取失败: \(error.localizedDescription)")
             errorMessage = error.localizedDescription
             return ""
         }

@@ -37,7 +37,11 @@ final class IBSEngine {
     // MARK: - 搜索
 
     func search(keyword: String) async throws -> [SearchResult] {
-        guard let node0 = source.searchBook else { throw EngineError.noSearchNode }
+        AppLog.info("SEARCH", "〔\(source.name)〕开始搜索「\(keyword)」")
+        guard let node0 = source.searchBook else {
+            AppLog.warn("SEARCH", "〔\(source.name)〕无searchBook节点")
+            throw EngineError.noSearchNode
+        }
         let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw EngineError.emptyKeyword }
 
@@ -68,7 +72,11 @@ final class IBSEngine {
             let dom = HTMLParser.parse(step.text)
             entries = ExSelector.parse(listRule).select(from: dom).map { ($0.textContent, $0) }
         }
-        guard !entries.isEmpty else { return [] }
+        guard !entries.isEmpty else {
+            AppLog.warn("SEARCH", "〔\(source.name)〕列表为空 (_list规则: \(listRule.prefix(60)))")
+            return []
+        }
+        AppLog.info("SEARCH", "〔\(source.name)〕列表项 \(entries.count) 个（\(listRule.hasPrefix("@json:") ? "JSON" : "DOM")模式）")
 
         var results: [SearchResult] = []
         var seen = Set<String>()
@@ -101,6 +109,7 @@ final class IBSEngine {
                 matchKind: Self.classify(title: title, author: author, keyword: trimmed)
             ))
         }
+        AppLog.info("SEARCH", "〔\(source.name)〕完成：\(results.count) 本书")
         return results
     }
 
@@ -261,6 +270,7 @@ final class IBSEngine {
         } else {
             urlStr = nil
         }
+        AppLog.debug("ENGINE", "节点url求值: \(urlStr ?? "nil")")
 
         // 2. 短路（nil / data: URL → 空响应继续走 parser + middleHandle）
         var text = ""

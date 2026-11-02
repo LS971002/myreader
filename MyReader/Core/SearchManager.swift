@@ -35,6 +35,7 @@ final class SearchManager: ObservableObject {
             var collected: [SearchResult] = []
             var failed: [String] = []
             let sourceList = sources.sorted { $0.weight > $1.weight }
+            AppLog.info("SEARCH", "多源搜索开始：\(sourceList.count)个源，词「\(trimmed)」，并发\(concurrency)")
 
             await withTaskGroup(of: (String, [SearchResult]?, String?)?.self) { group in
                 var iterator = sourceList.makeIterator()
@@ -53,6 +54,7 @@ final class SearchManager: ObservableObject {
                             } catch is CancellationError {
                                 return nil
                             } catch {
+                                AppLog.error("SEARCH", "〔\(name)〕失败: \(error.localizedDescription)")
                                 return (name, nil, error.localizedDescription)
                             }
                         }
@@ -86,6 +88,8 @@ final class SearchManager: ObservableObject {
                     addNext()
                 }
             }
+
+            AppLog.info("SEARCH", "多源搜索完成：成功\(collected.count)本 / 失败\(failed.count)源")
 
             await MainActor.run {
                 guard let self else { return }

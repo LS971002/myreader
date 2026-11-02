@@ -11,7 +11,11 @@ struct MyReaderApp: App {
                 .environmentObject(store)
                 .environmentObject(theme)
                 .preferredColorScheme(theme.colorScheme)
+                .onAppear {
+                    AppLog.info("APP", "启动：书架\(store.books.count)本 / 书源\(store.sources.count)个")
+                }
                 .onOpenURL { url in
+                    AppLog.info("APP", "外部打开：\(url.lastPathComponent)")
                     handleOpen(url: url)
                 }
         }

@@ -358,8 +358,10 @@ final class SpeechCenter: NSObject, ObservableObject, AVSpeechSynthesizerDelegat
         guard let model, !chapterLoading else { return }
         chapterLoading = true
         defer { chapterLoading = false }
+        AppLog.info("TTS", "朗读加载第\(chapter + 1)章")
         let text = await model.chapterText(chapter)
         guard !text.isEmpty else {
+            AppLog.warn("TTS", "第\(chapter + 1)章无内容，朗读停止")
             finishedNotice = "第 \(chapter + 1) 章没有内容，朗读停止"
             stopAll()
             return
@@ -369,6 +371,7 @@ final class SpeechCenter: NSObject, ObservableObject, AVSpeechSynthesizerDelegat
         totalSegments = segments.count
         playedStack.removeAll()
         finishedNotice = nil
+        AppLog.info("TTS", "分段完成：\(segments.count)段（每段~\(segmentChars)字）")
         playSegment(fromEnd ? segments.count - 1 : 0)
     }
 
