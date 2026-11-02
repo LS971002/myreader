@@ -39,7 +39,7 @@ struct IncomingBookSheet: View {
                     HStack {
                         Text("来源")
                         Spacer()
-                        Text(draft.localFile?.lastPathComponent ?? "本地文件")
+                        Text(draft.localFile.map { Paths.absolute($0).lastPathComponent } ?? "本地文件")
                             .font(.caption).foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
