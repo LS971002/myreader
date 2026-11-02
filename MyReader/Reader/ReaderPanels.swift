@@ -527,11 +527,12 @@ final class SpeechManager: NSObject, ObservableObject, AVSpeechSynthesizerDelega
     private func setupRemoteCommands() {
         let center = MPRemoteCommandCenter.shared()
         func bind(_ command: MPRemoteCommand, handler: @escaping () -> Void) {
+            // addTarget 返回 Any（非Optional）
             let token = command.addTarget { _ in
                 DispatchQueue.main.async { handler() }
                 return .success
             }
-            if let token { remoteCommands.append((command, token)) }
+            remoteCommands.append((command, token))
         }
         bind(center.playCommand) { [weak self] in self?.resume() }
         bind(center.pauseCommand) { [weak self] in self?.pause() }
