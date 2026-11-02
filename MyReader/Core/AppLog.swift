@@ -128,7 +128,7 @@ final class AppLog {
 
     private func truncateIfOversize(_ file: URL) {
         let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int) ?? 0
-        if size > maxFileBytes, let handle = FileHandle(forReadingAndUpdateAt: file.path) {
+        if size > maxFileBytes, let handle = FileHandle(forUpdating: file) {
             // 保留尾部 2MB（最新内容）
             let keep = 2 * 1024 * 1024
             handle.seek(toFileOffset: UInt64(max(0, size - keep)))
@@ -162,17 +162,19 @@ final class AppLog {
     /// 合并导出：header + 全部日志文件（旧→新）+ 内存缓冲尾部。
     func exportText() -> String {
         var parts: [String] = [header]
-        if let files = try? FileManager.default.contentsOfDirectory(
-            at: dir, includingPropertiesForKeys: [.contentModificationDateKey])?.sorted(by: { a, b in
+        // 注意：try? 包裹整个表达式，contentsOfDirectory 返回 [URL]（非optional），
+        // 排序在解包后进行——勿在 try? 链内再叠 ?.
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let sorted = files.sorted { a, b in
             let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
             let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
             return da < db
-        }) {
-            for file in files where file.pathExtension == "log" {
-                parts.append("===== \(file.deletingPathExtension().lastPathComponent) =====")
-                if let text = try? String(contentsOf: file, encoding: .utf8) {
-                    parts.append(text)
-                }
+        }
+        for file in sorted where file.pathExtension == "log" {
+            parts.append("===== \(file.deletingPathExtension().lastPathComponent) =====")
+            if let text = try? String(contentsOf: file, encoding: .utf8) {
+                parts.append(text)
             }
         }
         parts.append("===== 内存缓冲（最近 \(buffer.count) 条）=====")
@@ -186,7 +188,6 @@ final class AppLog {
     func exportFileURL() -> URL {
         let url = dir.appendingPathComponent("MyReader诊断日志.txt")
         let text = exportText()
-        queue.sync { }
         try? text.data(using: .utf8)?.write(to: url)
         return url
     }
