@@ -157,7 +157,7 @@ final class HTTPClient {
         }
         guard offset < bytes.count - 8 else { return nil }
         let deflate = Data(bytes[offset..<(bytes.count - 8)])
-        return EPUB.inflate(deflate, expected: bytes.count * 4)
+        return EPUBArchive.inflate(deflate, expected: bytes.count * 4)
     }
 
     /// 表单编码（保留字母数字与 -._~，其余 percent-encode）。
