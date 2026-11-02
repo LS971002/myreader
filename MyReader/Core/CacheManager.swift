@@ -33,7 +33,7 @@ final class CacheManager: ObservableObject {
         let targets = onlyMissing ? scope.filter { !$0.cached } : scope
         guard !targets.isEmpty else { return }
 
-        var state = CacheProgress(bookID: book.id, total: targets.count, running: true)
+        let state = CacheProgress(bookID: book.id, total: targets.count, running: true)
         progress[book.id] = state
 
         let bookID = book.id

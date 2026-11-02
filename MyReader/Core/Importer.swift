@@ -23,7 +23,7 @@ enum Importer {
         let ext = url.pathExtension.lowercased()
         switch ext {
         case "ibs":
-            _ = try? importIBS(url: url)
+            _ = try? importIBS(from: url)
         case "json":
             _ = try? importBookSources(from: url)
         default:

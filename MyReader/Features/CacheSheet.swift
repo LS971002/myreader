@@ -150,8 +150,8 @@ struct CacheSheet: View {
     }
 
     private func startCache() {
+        if useRange && rangeStart > rangeEnd { return }
         let range = useRange ? rangeStart...rangeEnd : nil
-        if let range, rangeStart > rangeEnd { return }
         var target = book
         // 只补未缓存时把 cached 状态先同步一遍
         if onlyMissing {

@@ -202,7 +202,7 @@ final class DynEngine {
             }
             let value = evalExpr(valueExpr)
             let keyName = key.isEmpty ? "" : key
-            ctx.store[keyName] = value
+            ctx.store.values[keyName] = value
             return StmtResult(value: .null)
         }
 
@@ -515,7 +515,7 @@ final class DynEngine {
                 guard idx >= 0 else { return .str("") }
                 return .str(String(decoding: utf16[..<min(idx, utf16.count)], as: UTF16.self))
             case "jxd_executeRegexRules":
-                return executeRegex(s, rule: arg0?.stringValue ?? "")
+                return Self.executeRegex(s, rule: arg0?.stringValue ?? "")
             case "componentsSeparatedByString":
                 let sep = arg0?.stringValue ?? ","
                 return .arr2(s.components(separatedBy: sep).map { .str($0) })

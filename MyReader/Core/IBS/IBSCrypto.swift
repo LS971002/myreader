@@ -1,5 +1,6 @@
 import Foundation
 import CommonCrypto
+import CryptoKit
 
 /// 爱阅书香 .ibs 书源文件解密：
 /// 第一层 WinZip AES-256（AE-2）加密 ZIP → configs.json
@@ -339,10 +340,6 @@ enum IBSCrypto {
     }
 
     static func md5(_ data: Data) -> String {
-        var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
-        data.withUnsafeBytes { ptr in
-            _ = CC_MD5(ptr.baseAddress, CC_LONG(data.count), &digest)
-        }
-        return digest.map { String(format: "%02x", $0) }.joined()
+        Insecure.MD5.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }

@@ -122,9 +122,11 @@ struct SettingsView: View {
     }
 
     private func exportSources() {
-        guard let data = try? LenientJSON.encoder.encode(store.sources) else { return }
+        let texts = store.sourceRecords.map(\.rawJSON)
+        guard !texts.isEmpty else { return }
+        let json = "[" + texts.joined(separator: ",\n") + "]"
         let file = Paths.root.appendingPathComponent("书源导出.json")
-        try? data.write(to: file)
+        try? json.data(using: .utf8)?.write(to: file)
         exported = file
     }
 

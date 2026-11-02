@@ -190,17 +190,17 @@ final class IBSEngine {
             let runner = RuleRunner(ctx: makeContext(step: step))
             let dom = HTMLParser.parse(step.text)
             let text = runner.run(RuleValue.combo(contentRules), input: step.text, dom: dom)
-            if let text, !text.isEmpty { return cleanContent(text) }
+            if let text, !text.isEmpty { return Self.cleanContent(text) }
         }
         // 兜底：_range
         if let rangeRules = fieldRules(step.parser, "_range") {
             let runner = RuleRunner(ctx: makeContext(step: step))
             let dom = HTMLParser.parse(step.text)
             let text = runner.run(RuleValue.combo(rangeRules), input: step.text, dom: dom)
-            if let text, !text.isEmpty { return cleanContent(text) }
+            if let text, !text.isEmpty { return Self.cleanContent(text) }
         }
         // 最终兜底：整页转文本
-        return cleanContent(HTMLParser.htmlToText(step.text))
+        return Self.cleanContent(HTMLParser.htmlToText(step.text))
     }
 
     // MARK: - 节点执行（核心）
@@ -364,10 +364,10 @@ final class IBSEngine {
         return nil
     }
 
-    /// 深度替换节点树规则串中的占位词。
+    /// 深度替换节点树规则串中的占位词（RuleNode 为 class，先深拷贝隔离）。
     private func injectKeyword(_ node: RuleNode, placeholder: String?, keyword: String) -> RuleNode {
         guard let placeholder, !placeholder.isEmpty, placeholder != keyword else { return node }
-        var copy = node
+        let copy = node.cloned()
         copy.url = replaceInRuleValue(node.url, placeholder: placeholder, keyword: keyword)
         copy.nextPageUrl = replaceInRuleValue(node.nextPageUrl, placeholder: placeholder, keyword: keyword)
         copy.parser = replaceInParser(node.parser, placeholder: placeholder, keyword: keyword)

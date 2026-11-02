@@ -56,9 +56,10 @@ enum ParserField {
 }
 
 /// 每个规则节点（searchBook / sourceDetail / chapterDetail / middleHandle…）。
+/// 引用类型：middleHandle 递归包含自身（值类型会无限大小）。
 /// 字段类型在真实 IBS 文件里非常混乱（数字可能是字符串、url 可能是数组），
-/// 因此不做标准 Codable，统一用字典工厂构造。
-struct RuleNode {
+/// 统一用字典工厂构造。
+final class RuleNode: @unchecked Sendable {
     var url: RuleValue?
     var forGetMethod: Bool = true
     var params: [String: String] = [:]
@@ -81,9 +82,9 @@ struct RuleNode {
         url = RuleValue.from(dict["url"])
         forGetMethod = (dict["forGetMethod"] as? Bool) ?? true
         params = Self.stringDict(dict["params"]) ?? [:]
-        if let parser = dict["parser"] as? [String: Any] {
+        if let parserDict = dict["parser"] as? [String: Any] {
             var result: [String: ParserField] = [:]
-            for (key, value) in parser {
+            for (key, value) in parserDict {
                 if key.hasPrefix("^-^"), let s = value as? String {
                     extraKeys[key] = s
                 } else if let field = ParserField.from(value) {
@@ -106,12 +107,32 @@ struct RuleNode {
         if let http = dict["httpConfigs"] as? [String: Any] {
             httpConfigs = HTTPConfig(dict: http)
         }
-        // XDKEYWORD 之类的特殊键：记录下来供搜索词注入
         for (key, value) in dict {
             if key.hasPrefix("^-^"), let s = value as? String {
                 extraKeys[key] = s
             }
         }
+    }
+
+    /// 深拷贝（class 引用语义下的值隔离，供 keyword 注入等改写场景）。
+    func cloned() -> RuleNode {
+        let copy = RuleNode(dict: nil)
+        copy.url = url
+        copy.forGetMethod = forGetMethod
+        copy.params = params
+        copy.parser = parser
+        copy.middleHandle = middleHandle?.cloned()
+        copy.nextPageUrl = nextPageUrl
+        copy.nextPageParams = nextPageParams
+        copy.nextPageForGetMethod = nextPageForGetMethod
+        copy.maxPageCount = maxPageCount
+        copy.requestByWebView = requestByWebView
+        copy.tryCount = tryCount
+        copy.trySpaceSecond = trySpaceSecond
+        copy.responseType = responseType
+        copy.httpConfigs = httpConfigs
+        copy.extraKeys = extraKeys
+        return copy
     }
 
     /// 字段规则组：parser 顶层 → _SourceFields → _BookFields 依次查找。
@@ -270,7 +291,7 @@ struct SearchResult: Identifiable, Hashable {
     var intro: String
     var latest: String
     /// 匹配类型：书名精确 / 书名模糊 / 作者匹配（搜索排序用）。
-    var matchKind: MatchKind = .fuzzy
+    var matchKind: MatchKind = .fuzzyTitle
 
     enum MatchKind: Int {
         case exactTitle = 0
