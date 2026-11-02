@@ -13,6 +13,8 @@ struct ReaderView: View {
     @State private var dragOffset: CGFloat = 0
     @State private var isTurning = false            // 翻页动画进行中（防重入）
     @State private var zombieGesture = false        // 动画期间开始的手势会话 → 整段作废
+    /// 拖拽提交翻页期间禁用 move 转场（邻页已跟手滑入，直接切换防叠加闪动）。
+    @State private var suppressTransition = false
     /// 翻页完成后的短冷却截止时刻：一次物理滑动被SwiftUI拆成两个手势会话时，
     /// 第二会话在此期间开始 → zombie 屏蔽（防连翻两页）。
     @State private var cooldownUntil = Date.distantPast
@@ -159,16 +161,28 @@ struct ReaderView: View {
                 // 右邻页（章内下一页 / 下一章首页）
                 neighborPage(edge: .trailing, width: width)
 
-                // 当前页
+                // 当前页：点击翻页用 move 转场（新页从翻页方向滑入、旧页向对侧滑出），
+                // 拖拽翻页用 offset 跟手（dragOffset 由手势驱动）
                 PageCanvas(text: currentPageText,
                            settings: settings,
                            theme: theme.current)
                     .offset(x: dragOffset)
                     .id(model.book.currentChapter * 100_000 + model.pageIndex)
-                    .transition(.opacity)
+                    .transition(pageTransition)
             }
             .allowsHitTesting(false)
         }
+    }
+
+    /// 转场方向：跟随最近一次章节跳转/翻页方向。
+    /// 拖拽提交期间 suppressTransition=true（邻页已跟手滑入，id 变化直接切换，
+    /// 避免 move 转场与滑入动画叠加闪动）。
+    private var pageTransition: AnyTransition {
+        if suppressTransition { return .identity }
+        return .asymmetric(
+            insertion: .move(edge: model.lastJumpForward ? .trailing : .leading),
+            removal: .move(edge: model.lastJumpForward ? .leading : .trailing)
+        )
     }
 
     @ViewBuilder
@@ -248,15 +262,13 @@ struct ReaderView: View {
 
     // MARK: - 翻页动画
 
-    /// 翻页动画（点击与拖拽统一为单段）：
-    /// 动画期间当前页与邻页一起滑过屏（offset 达 ±width）→ 提交翻页 → 归零
-    /// （邻页此刻即为新当前页，无缝停留，无第二段动画）。
+    /// 翻页完成（拖拽松手路径）：邻页已跟手滑入 → 提交翻页 → 归零，无缝停留。
     private func finishTurn(forward: Bool, width: CGFloat) {
         guard !isTurning else { return }
         isTurning = true
         let target: CGFloat = forward ? -width : width
 
-        // 章末/章首越界：翻的是章节（异步加载，直接归零避免旧内容闪回）
+        // 章末/章首越界：翻的是章节
         let crossForward = forward && model.neighborNext == nil
         let crossBack = !forward && model.neighborPrev == nil
 
@@ -266,20 +278,36 @@ struct ReaderView: View {
 
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 300_000_000)
+            suppressTransition = true
             if crossForward {
                 model.goNextChapter()
-                dragOffset = 0
             } else if crossBack {
                 model.goPreviousChapter()
-                dragOffset = 0
             } else {
                 if forward { model.nextPage() } else { model.prevPage() }
-                // 提交后归零：滑入的邻页即新当前页
-                dragOffset = 0
             }
+            dragOffset = 0
             isTurning = false
             // 冷却期：吸收同一次物理滑动的残余手势会话
             cooldownUntil = Date().addingTimeInterval(0.15)
+            // 转场恢复延后（等 id 变化的渲染提交完成后；期间 isTurning/cooldown 挡住点击翻页）
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            suppressTransition = false
+        }
+    }
+
+    /// 点击翻页：原生 move 转场（当前页 id 变化触发，新页沿翻页方向滑入、旧页滑出）。
+    private func tapTurn(forward: Bool) {
+        guard !isTurning else { return }
+        isTurning = true
+        model.lastJumpForward = forward
+        withAnimation(.spring(response: 0.35, dampingFraction: 1.0)) {
+            if forward { model.nextPage() } else { model.prevPage() }
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 360_000_000)
+            isTurning = false
+            cooldownUntil = Date().addingTimeInterval(0.12)
         }
     }
 
@@ -382,9 +410,9 @@ struct ReaderView: View {
         }
         let third = width / 3
         if x < third {
-            finishTurn(forward: false, width: width)
+            tapTurn(forward: false)
         } else if x > width - third {
-            finishTurn(forward: true, width: width)
+            tapTurn(forward: true)
         } else {
             withAnimation { showMenu = true }
         }

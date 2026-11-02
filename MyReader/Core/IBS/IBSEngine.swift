@@ -250,6 +250,11 @@ final class IBSEngine {
             if urlRule.hasPrefix("@dyn:") {
                 let engine = DynEngine(ctx: ctx)
                 urlStr = engine.executeString(String(urlRule.dropFirst(5)))
+            } else if urlRule.hasPrefix("@get:{"), urlRule.hasSuffix("}") {
+                // rule store 变量取值（00小说 MH url 形态：上层脚本 rule.put 存入）
+                let key = String(urlRule.dropFirst(6).dropLast())
+                let value = ctx.store.values[key]?.stringValue
+                urlStr = (value == nil || value == "null") ? nil : value
             } else {
                 urlStr = applyParams(urlRule, params: node.params, keyword: keyword)
             }

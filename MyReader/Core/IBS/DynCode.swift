@@ -299,6 +299,21 @@ final class DynEngine {
         let expr = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !expr.isEmpty else { return .null }
 
+        // @get:{key} —— rule store 变量取值语法糖（00小说 MH url 形态）
+        if expr.hasPrefix("@get:{"), expr.hasSuffix("}") {
+            let key = String(expr.dropFirst(6).dropLast())
+            return ctx.store.values[key] ?? .str("null")
+        }
+        // @put:{value} withKey:{key} —— 变量存值语法糖
+        if expr.hasPrefix("@put:{"), expr.contains("} withKey:{") {
+            let value = String(expr.dropFirst(6).prefix(while: { $0 != "}" }))
+            if let keyRange = expr.range(of: "withKey:{"), let closeIdx = expr[keyRange.upperBound...].firstIndex(of: "}") {
+                let key = String(expr[keyRange.upperBound..<closeIdx])
+                ctx.store.values[key] = .str(value)
+            }
+            return .null
+        }
+
         // def: 字面量（到行尾；\; → ;；剥尾部语句分号）
         if expr.hasPrefix("def:") {
             return .str(defLiteral(String(expr.dropFirst(4))))

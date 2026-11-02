@@ -156,6 +156,7 @@ final class ReaderModel: ObservableObject {
     // MARK: - 翻页
 
     func nextPage() {
+        lastJumpForward = true
         if pageIndex + 1 < pages.count {
             pageIndex += 1
             persistProgress()
@@ -165,6 +166,7 @@ final class ReaderModel: ObservableObject {
     }
 
     func prevPage() {
+        lastJumpForward = false
         if pageIndex > 0 {
             pageIndex -= 1
             persistProgress()

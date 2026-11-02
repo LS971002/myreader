@@ -9,6 +9,8 @@ struct DiscoverView: View {
     @State private var addedMessage: String?
     @State private var showSourceList = false
     @State private var expandedGroup: UUID?
+    /// 最近一次搜索的词（区分"未搜索"与"搜完无结果"两种空态）。
+    @State private var lastSearched: String?
 
     var body: some View {
         NavigationView {
@@ -18,7 +20,11 @@ struct DiscoverView: View {
                 if manager.running {
                     statusView
                 } else if manager.groups.isEmpty {
-                    emptyState
+                    if lastSearched != nil {
+                        noResultState
+                    } else {
+                        emptyState
+                    }
                 } else {
                     resultList
                 }
@@ -93,6 +99,30 @@ struct DiscoverView: View {
             if !manager.groups.isEmpty {
                 Text("已找到 \(manager.groups.count) 本书，先到先显示")
                     .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// 搜完无结果（区别于未搜索的初始态）。
+    private var noResultState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 42)).foregroundStyle(.secondary)
+            Text("未找到「\(lastSearched ?? "")」相关书籍")
+                .font(.headline)
+            Text("已响应 \(manager.totalSources - manager.failures.count)/\(manager.totalSources) 个书源\n可换个关键词，或检查书源是否可用")
+                .font(.footnote).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            if !manager.failures.isEmpty {
+                VStack(spacing: 4) {
+                    Text("未响应的书源：")
+                        .font(.caption2).foregroundStyle(.orange)
+                    ForEach(manager.failures.prefix(3), id: \.self) { entry in
+                        Text(entry).font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.top, 6)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -186,6 +216,7 @@ struct DiscoverView: View {
         let text = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         expandedGroup = nil
+        lastSearched = text
         manager.search(keyword: text, sources: store.enabledSources,
                        concurrency: store.settings.searchConcurrency)
     }
