@@ -786,6 +786,13 @@ final class DynEngine {
         return String(format: "%g", n)
     }
 
+    /// 搜索词 URL 编码（路径/查询均安全：保留字母数字与-._~）。
+    static func percentEncodeStatic(_ s: String) -> String {
+        let allowed = CharacterSet(charactersIn:
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
+        return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
+    }
+
     private func percentEncode(_ s: String) -> String {
         s.addingPercentEncoding(
             withAllowedCharacters: CharacterSet(charactersIn:

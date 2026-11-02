@@ -99,8 +99,63 @@ final class RuleRunner {
             return value?.isEmpty == true ? nil : value
         }
 
-        // 兜底：纯文本（type 0）直接返回
+        // 兜底：纯文本（type 0）
+        // JSON 项上下文增强（猫眼API形态）：
+        //   - 无前缀短词 → JSON 键/点路径求值（bookName: "novelName"）
+        //   - {{$.path}} 模板 → JSON 取值插值（dirURL: "\"/novel/{{$.novelId}}/chapters\""，剥首尾引号）
+        if hasJSONContext(input) {
+            if trimmed.contains("{{") {
+                let expanded = expandJSONTemplate(stripQuotes(trimmed), input: input)
+                if !expanded.isEmpty { return expanded }
+            }
+            if isPlainPath(trimmed), !trimmed.contains(" "),
+               let value = JSONRule.path(trimmed, in: input).first, !value.isEmpty {
+                return value
+            }
+        }
         return trimmed
+    }
+
+    /// 输入是 JSON 对象形态（以 { 开头）。
+    private func hasJSONContext(_ input: String) -> Bool {
+        input.hasPrefix("{")
+    }
+
+    /// `"/novel/{{$.novelId}}/chapters"` → 剥首尾引号。
+    private func stripQuotes(_ text: String) -> String {
+        var t = text
+        if t.hasPrefix("\"") { t = String(t.dropFirst()) }
+        if t.hasSuffix("\"") { t = String(t.dropLast()) }
+        return t
+    }
+
+    /// 纯路径词（字母数字点下划线，非选择器形态）。
+    private func isPlainPath(_ text: String) -> Bool {
+        !text.isEmpty && text.allSatisfy { c in
+            c.isLetter || c.isNumber || c == "." || c == "_"
+        }
+    }
+
+    /// {{$.a.b}} 模板插值（值来自输入 JSON）。
+    private func expandJSONTemplate(_ template: String, input: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: #"\{\{\$\.([^}]+)\}\}"#) else {
+            return template
+        }
+        let ns = template as NSString
+        var out = ""
+        var cursor = 0
+        for m in regex.matches(in: template, range: NSRange(location: 0, length: ns.length)) {
+            if m.range.location > cursor {
+                out += ns.substring(with: NSRange(location: cursor, length: m.range.location - cursor))
+            }
+            let key = ns.substring(with: m.range(at: 1))
+            out += JSONRule.path(key, in: input).first ?? ""
+            cursor = m.range.location + m.range.length
+        }
+        if cursor < ns.length {
+            out += ns.substring(with: NSRange(location: cursor, length: ns.length - cursor))
+        }
+        return out
     }
 
     /// 列表项字段规则：在节点子树内执行。
@@ -183,13 +238,32 @@ final class RuleRunner {
 // MARK: - JSON 路径（自旧引擎迁移）
 
 enum JSONRule {
-    /// `data.books[0].title`、`a.b[*].c`
+    /// `data.books` → 原始对象/数组项列表（搜索 _list 用：保留 dict/array 形态）。
+    static func objectArray(_ path: String, in text: String) -> [Any] {
+        guard
+            let data = text.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data)
+        else { return [] }
+        return pathValues(path, roots: [object])
+    }
+
+    /// `data.books[0].title`、`a.b[*].c` → 字符串值列表
     static func path(_ path: String, in text: String) -> [String] {
         guard
             let data = text.data(using: .utf8),
             let object = try? JSONSerialization.jsonObject(with: data)
         else { return [] }
+        return pathValues(path, roots: [object]).compactMap { value -> String? in
+            switch value {
+            case let s as String: return s
+            case let n as NSNumber: return n.stringValue
+            default: return nil
+            }
+        }
+    }
 
+    /// 路径求值核心（roots 为起点对象集合，返回原始值）。
+    private static func pathValues(_ path: String, roots: [Any]) -> [Any] {
         var cleaned = path.trimmingCharacters(in: .whitespaces)
         if cleaned.hasPrefix("$") { cleaned = String(cleaned.dropFirst()) }
         if cleaned.hasPrefix(".") { cleaned = String(cleaned.dropFirst()) }
@@ -204,7 +278,7 @@ enum JSONRule {
         }
         if !current.isEmpty { keys.append(current) }
 
-        var currentValues: [Any] = [object]
+        var currentValues: [Any] = roots
         for key in keys {
             var next: [Any] = []
             if key == "*" {
@@ -228,13 +302,6 @@ enum JSONRule {
             currentValues = next
             if currentValues.isEmpty { return [] }
         }
-
-        return currentValues.compactMap { value -> String? in
-            switch value {
-            case let s as String: return s
-            case let n as NSNumber: return n.stringValue
-            default: return nil
-            }
-        }
+        return currentValues
     }
 }

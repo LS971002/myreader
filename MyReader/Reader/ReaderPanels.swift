@@ -470,6 +470,26 @@ final class SpeechCenter: NSObject, ObservableObject, AVSpeechSynthesizerDelegat
         playSegment(currentSegment)
     }
 
+    /// 分段字数变化 → 重切当前章，从当前朗读内容处继续（锚点=当前段首句前缀）。
+    func resegment(chunk: Int) {
+        segmentChars = max(100, chunk)
+        guard let model, !segments.isEmpty else { return }
+        let anchor = segments.indices.contains(currentSegment)
+            ? String(segments[currentSegment].prefix(20)) : nil
+        Task { [weak self] in
+            let text = await model.chapterText(self?.currentChapter ?? 0)
+            guard let self, !text.isEmpty else { return }
+            let newSegments = Self.splitSegments(text, chunk: max(100, self.segmentChars))
+            self.segments = newSegments
+            self.totalSegments = newSegments.count
+            if let anchor, let idx = newSegments.firstIndex(where: { $0.contains(anchor) }) {
+                self.playSegment(idx)
+            } else {
+                self.playSegment(min(self.currentSegment, max(0, newSegments.count - 1)))
+            }
+        }
+    }
+
     func stopAll() {
         synthesizer.stopSpeaking(at: .immediate)
         utteranceIndex.removeAll()
@@ -835,6 +855,17 @@ struct TTSPage: View {
                 ))
                 .font(.caption)
             }
+
+            // 一次朗读内容块的字数配置（对齐源APP「本地听书分段字符数」）
+            Stepper("分段字数：\(store.settings.ttsSegmentChars)",
+                    value: Binding(
+                        get: { store.settings.ttsSegmentChars },
+                        set: { v in
+                            store.updateSettings { $0.ttsSegmentChars = v }
+                            center.resegment(chunk: v)
+                        }
+                    ), in: 100...2000, step: 100)
+                .font(.caption)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)

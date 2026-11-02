@@ -102,9 +102,9 @@ struct ReaderView: View {
                         let shouldTurn = dx < -pageWidth * 0.32 || velocity < -pageWidth * 0.6
                         let shouldBack = dx > pageWidth * 0.32 || velocity > pageWidth * 0.6
                         if shouldTurn {
-                            finishTurn(forward: true, width: pageWidth)
+                            finishTurn(forward: true, width: pageWidth, followDrag: true)
                         } else if shouldBack {
-                            finishTurn(forward: false, width: pageWidth)
+                            finishTurn(forward: false, width: pageWidth, followDrag: true)
                         } else {
                             // 回弹
                             withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
@@ -237,8 +237,11 @@ struct ReaderView: View {
 
     // MARK: - 翻页动画
 
-    /// 拖拽已越界 → 动画滑完 → 提交翻页 → 新页从对侧滑入。
-    private func finishTurn(forward: Bool, width: CGFloat) {
+    /// 翻页完成动画。
+    /// - followDrag=true（手动拖拽）：邻页已跟手滑入占屏 → 单段滑出后提交并归零，
+    ///   无缝停留在新页（无第二段动画）。
+    /// - followDrag=false（点击翻页）：无跟手过程 → 滑出后瞬移对侧再滑入（两段）。
+    private func finishTurn(forward: Bool, width: CGFloat, followDrag: Bool = false) {
         guard !isTurning else { return }
         isTurning = true
         let target: CGFloat = forward ? -width : width
@@ -261,12 +264,17 @@ struct ReaderView: View {
                 dragOffset = 0
             } else {
                 if forward { model.nextPage() } else { model.prevPage() }
-                // 瞬移到对侧（无动画），新页滑入
-                dragOffset = forward ? width : -width
-                withAnimation(.spring(response: 0.30, dampingFraction: 1.0)) {
+                if followDrag {
+                    // 手动拖拽：提交后直接归零——刚才滑入的邻页此刻即为当前页，无缝停留
                     dragOffset = 0
+                } else {
+                    // 点击：瞬移到对侧（无动画），新页滑入
+                    dragOffset = forward ? width : -width
+                    withAnimation(.spring(response: 0.30, dampingFraction: 1.0)) {
+                        dragOffset = 0
+                    }
+                    try? await Task.sleep(nanoseconds: 320_000_000)
                 }
-                try? await Task.sleep(nanoseconds: 320_000_000)
             }
             isTurning = false
             // 冷却期：吸收同一次物理滑动的残余手势会话
@@ -334,7 +342,8 @@ struct ReaderView: View {
             Spacer()
 
             HStack(spacing: 0) {
-                menuButton("上一章", "chevron.up") { model.goPreviousChapter() }
+                // 菜单"上一章"定位到上一章开头（对齐源APP；末页语义仅用于翻页越界连续回退）
+                menuButton("上一章", "chevron.up") { model.jump(to: max(0, model.book.currentChapter - 1)) }
                 menuButton("目录", "list.triangle") { showCatalog = true }
                 menuButton("朗读", "waveform") { SpeechCenter.shared.begin(model: model) }
                 menuButton("设置", "textformat.size") { showSettings = true }

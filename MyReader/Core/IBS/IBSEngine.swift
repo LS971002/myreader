@@ -52,38 +52,53 @@ final class IBSEngine {
         guard let listRules = fieldRules(step.parser, "_list"), let listRule = listRules.first else {
             return []
         }
-        let dom = HTMLParser.parse(step.text)
-        let items = ExSelector.parse(listRule).select(from: dom)
-        guard !items.isEmpty else { return [] }
-
         let runner = RuleRunner(ctx: makeContext(step: step))
+
+        // 双模式列表：@json: 路径 → JSON 数组项；否则 HTML DOM 选择器
+        // 字段规则求值输入：JSON 模式 = (项JSON文本, nil)；DOM 模式 = (节点文本, 节点对象)
+        var entries: [(input: String, node: HTMLNode?)] = []
+        if listRule.hasPrefix("@json:") {
+            let path = String(listRule.dropFirst(6))
+            entries = JSONRule.objectArray(path, in: step.text).compactMap { item in
+                guard let data = try? JSONSerialization.data(withJSONObject: item),
+                      let text = String(data: data, encoding: .utf8) else { return nil }
+                return (text, nil)
+            }
+        } else {
+            let dom = HTMLParser.parse(step.text)
+            entries = ExSelector.parse(listRule).select(from: dom).map { ($0.textContent, $0) }
+        }
+        guard !entries.isEmpty else { return [] }
+
         var results: [SearchResult] = []
         var seen = Set<String>()
 
-        for item in items.prefix(80) {
-            let title = runField(runner, parser: step.parser, name: "bookName",
-                                 node: item, dom: step.text) ?? ""
+        for entry in entries.prefix(80) {
+            let title = runFieldOn(runner, parser: step.parser, name: "bookName",
+                                   input: entry.input, node: entry.node) ?? ""
             guard !title.isEmpty else { continue }
             let key = title + "|" + (fieldRules(step.parser, "dirURL")?.first ?? "")
             if !seen.insert(key).inserted { continue }
 
-            let dirURL = runField(runner, parser: step.parser, name: "dirURL",
-                                  node: item, dom: step.text) ?? ""
+            let dirURL = runFieldOn(runner, parser: step.parser, name: "dirURL",
+                                    input: entry.input, node: entry.node) ?? ""
             let link = dirURL.isEmpty ? step.finalURL
                 : HTTPClient.absolute(dirURL, base: step.finalURL.isEmpty ? source.homeURL : step.finalURL)
+            let author = runFieldOn(runner, parser: step.parser, name: "author",
+                                    input: entry.input, node: entry.node) ?? ""
 
             results.append(SearchResult(
                 sourceID: source.id,
                 sourceName: source.name,
                 title: title,
-                author: runField(runner, parser: step.parser, name: "author", node: item, dom: step.text) ?? "",
+                author: author,
                 link: link,
                 cover: HTTPClient.absolute(
-                    runField(runner, parser: step.parser, name: "coverUrl", node: item, dom: step.text) ?? "",
+                    runFieldOn(runner, parser: step.parser, name: "coverUrl", input: entry.input, node: entry.node) ?? "",
                     base: source.homeURL),
-                intro: runField(runner, parser: step.parser, name: "desc", node: item, dom: step.text) ?? "",
-                latest: runField(runner, parser: step.parser, name: "lastChapterTitle", node: item, dom: step.text) ?? "",
-                matchKind: Self.classify(title: title, author: runField(runner, parser: step.parser, name: "author", node: item, dom: step.text) ?? "", keyword: trimmed)
+                intro: runFieldOn(runner, parser: step.parser, name: "desc", input: entry.input, node: entry.node) ?? "",
+                latest: runFieldOn(runner, parser: step.parser, name: "lastChapterTitle", input: entry.input, node: entry.node) ?? "",
+                matchKind: Self.classify(title: title, author: author, keyword: trimmed)
             ))
         }
         return results
@@ -110,9 +125,11 @@ final class IBSEngine {
                                      parentFrames: [], sourceRef: sourceRef)
         let runner = RuleRunner(ctx: makeContext(step: step))
         let dom = HTMLParser.parse(step.text)
-        let intro = runField(runner, parser: step.parser, name: "desc", node: dom, dom: step.text) ?? ""
+        let intro = runFieldOn(runner, parser: step.parser, name: "desc",
+                               input: dom.textContent, node: dom) ?? ""
         let cover = HTTPClient.absolute(
-            runField(runner, parser: step.parser, name: "coverUrl", node: dom, dom: step.text) ?? "",
+            runFieldOn(runner, parser: step.parser, name: "coverUrl",
+                       input: dom.textContent, node: dom) ?? "",
             base: source.homeURL)
         return (intro, cover)
     }
@@ -143,10 +160,10 @@ final class IBSEngine {
 
             let runner = RuleRunner(ctx: makeContext(step: step))
             for item in items {
-                let title = runField(runner, parser: step.parser, name: "title",
-                                     node: item, dom: step.text) ?? ""
-                let url = runField(runner, parser: step.parser, name: "url",
-                                   node: item, dom: step.text) ?? ""
+                let title = runFieldOn(runner, parser: step.parser, name: "title",
+                                       input: item.textContent, node: item) ?? ""
+                let url = runFieldOn(runner, parser: step.parser, name: "url",
+                                     input: item.textContent, node: item) ?? ""
                 guard !title.isEmpty, !url.isEmpty else { continue }
                 if !seenTitles.insert(title).inserted { continue }
                 chapters.append(Chapter(
@@ -337,10 +354,12 @@ final class IBSEngine {
     }
 
     /// 在列表项上执行字段组合规则。
-    private func runField(_ runner: RuleRunner, parser: [String: ParserField],
-                          name: String, node: HTMLNode, dom: String) -> String? {
+    /// - JSON 模式（node=nil）：input=项JSON文本，@json: 规则在其上求值
+    /// - DOM 模式（node非nil）：选择器在节点子树内执行（与原 runField 行为一致）
+    private func runFieldOn(_ runner: RuleRunner, parser: [String: ParserField],
+                            name: String, input: String, node: HTMLNode?) -> String? {
         guard let rules = fieldRules(parser, name) else { return nil }
-        return runner.run(RuleValue.combo(rules), input: node.textContent, dom: node)
+        return runner.run(RuleValue.combo(rules), input: input, dom: node)
     }
 
     private func makeContext(step: StepResult) -> DynContext {
@@ -354,10 +373,12 @@ final class IBSEngine {
 
     // MARK: - params / keyword
 
+    /// URL 中的 %@ → 搜索词（percent-encode：错层源 "/book/so/%@.html" 中文直接进URL会构造失败）。
     private func applyParams(_ url: String, params: [String: String], keyword: String?) -> String {
         var result = url
         if let keyword {
-            result = result.replacingOccurrences(of: "%@", with: keyword)
+            let encoded = DynEngine.percentEncodeStatic(keyword)
+            result = result.replacingOccurrences(of: "%@", with: encoded)
         }
         return result
     }
@@ -392,7 +413,8 @@ final class IBSEngine {
         return result
     }
 
-    /// 扫描值中的 `%@名称` / `%@calc(expr)` 占位符并替换为求值结果。
+    /// 扫描值中的 `%@名称` / `%@calc(expr)` / 裸 `%@` 占位符并替换为求值结果。
+    /// 裸 `%@`（无标识符跟随）= 搜索词（猫眼API形态：keyword: "%@"）。
     private func resolveParamPlaceholders(_ value: String, engine: DynEngine, keyword: String?) -> String {
         var out = ""
         var i = value.startIndex
@@ -441,6 +463,12 @@ final class IBSEngine {
                     } else if case .str(let s)? = engine.ctx.vars[name] {
                         out += s
                     }
+                    i = j
+                    continue
+                }
+                // 裸 %@ = 搜索词（值内直接替换）
+                if let keyword {
+                    out += keyword
                     i = j
                     continue
                 }
