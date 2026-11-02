@@ -72,7 +72,7 @@ struct ReaderView: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         guard settings.pageTurn != .scroll, !isTurning else { return }
-                        dragOffset = max(-width, min(width, value.translation.width))
+                        dragOffset = max(-pageWidth, min(pageWidth, value.translation.width))
                     }
                     .onEnded { value in
                         guard settings.pageTurn != .scroll, !isTurning else { return }
