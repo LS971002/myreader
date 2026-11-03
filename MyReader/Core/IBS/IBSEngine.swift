@@ -320,6 +320,10 @@ final class IBSEngine {
                         + " 节点=\(node.map { "<\($0.tag)> 文本:\($0.textContent.prefix(24))" } ?? "json")"
                 }
                 guard !title.isEmpty, !url.isEmpty else { continue }
+                // 通用防御：目录容器常常连带站点导航（「首页」「排行榜」/ `href="#"`），
+                // 混进来会被当成第 1 章，换源进度对齐直接错位
+                // （日志(13)：「第一章 灭门！」→「第1章 首页」）。
+                guard Self.looksLikeChapterItem(title: title, url: url, base: base) else { continue }
                 if !seenTitles.insert(title).inserted { continue }
                 chapters.append(Chapter(
                     index: chapters.count,
@@ -372,6 +376,31 @@ final class IBSEngine {
         }
         AppLog.info("DIR", "〔\(source.name)〕目录完成：\(chapters.count) 章")
         return chapters
+    }
+
+    /// 列表项是否像「章节」而非站点导航/工具栏。
+    /// 不针对某个源：站点导航在任何书源的目录容器里都可能被规则连带选中，
+    /// 表现为 url 为 `#`、指向站点根，或标题就是「首页」「排行榜」这类词。
+    static func looksLikeChapterItem(title: String, url: String, base: String) -> Bool {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return false }
+        let u = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        if u.isEmpty || u == "#" || u.lowercased().hasPrefix("javascript:")
+            || u.lowercased().hasPrefix("void(") {
+            return false
+        }
+        // 指向站点根（`/` 或 `https://host`）= 首页链接，不可能是章节
+        let absolute = HTTPClient.absolute(u, base: base)
+        if let path = URL(string: absolute)?.path, path.isEmpty || path == "/" {
+            return false
+        }
+        let navigation: Set<String> = [
+            "首页", "目录", "章节目录", "全部章节", "排行榜", "全部小说", "最新更新", "热门书",
+            "完本", "完结", "书架", "我的书架", "加入书架", "开始阅读", "马上阅读", "立即阅读",
+            "返回", "上一页", "下一页", "上一章", "下一章", "登录", "注册", "电脑版", "手机版",
+            "查看更多", "展开", "收起", "书签"
+        ]
+        return !navigation.contains(t)
     }
 
     // MARK: - 目录整页兜底
@@ -530,7 +559,21 @@ final class IBSEngine {
             // DOM 用 `_range` 裁剪后的范围（选择器类 content 规则常依赖它）；
             // 文本仍用整层响应（@json:/@def: 类规则需要完整 JSON）。
             let scoped = scopedLayerContent(layer, sourceRef: sourceRef)
-            var text = runner.run(RuleValue.combo(contentRules), input: layer.text, dom: scoped.dom)
+            // 逐条规则打点：正文空结果时能直接看出是哪一步清空的
+            // （规则数 / 每步字符数 / 起止值）。仅 DEBUG 级，正式包默认不落盘。
+            var stage = layer.text
+            // 复刻 RuleRunner.run 的 contents 累积：七猫 `@def:` 代码文本要靠
+            // contents[0] 传给后续 `@dyn:` 的 evaluateScript，漏掉会直接坏掉。
+            runner.ctx.contents.removeAll()
+            for (ruleIndex, rule) in contentRules.enumerated() {
+                let out = runner.runSingle(rule, input: stage,
+                                           dom: ruleIndex == 0 ? scoped.dom : nil) ?? ""
+                runner.ctx.contents.append(out)
+                AppLog.debug("CONTENT", "〔\(source.name)〕content[\(ruleIndex)] "
+                             + "\(stage.count)→\(out.count)字 规则:\(rule.prefix(44))")
+                stage = out
+            }
+            var text: String? = stage.isEmpty ? nil : stage
             // 智能兜底：@def: 携带 CryptoJS 的源（七猫形态）在 JS 解密链未生效时
             // （结果为 nil / 空 / 仍是 Base64 密文）→ 走原生 AES-128-CBC 解密。
             // 密文直接取响应里的 data.content，不依赖 JS 执行是否成功。

@@ -2,6 +2,13 @@ import Foundation
 import UIKit
 import Combine
 
+/// ⚠️ 必须 @MainActor：进程崩溃日志（13）显示 SIGABRT / thread=background，
+/// 调用栈 Combine `ObservableObjectPublisher.send` → SwiftUI `flushTransactions`
+/// → UIKitCore 布局 → CoreAutoLayout `NSInternalInconsistencyException`。
+/// 即后台线程写 `@Published`（`book.currentChapter = …` / `pages = …`），
+/// SwiftUI 同步在后台线程触发布局，Auto Layout 直接抛异常终止进程。
+/// 类级隔离后所有 @Published 写都在主线程，await 网络/解析仍会切到后台执行器。
+@MainActor
 final class ReaderModel: ObservableObject {
     let store: Store
     let bookID: UUID

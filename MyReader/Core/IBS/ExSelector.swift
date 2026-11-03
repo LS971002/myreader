@@ -44,8 +44,19 @@ struct ExSelector {
 
     static func parse(_ raw: String) -> ExSelector {
         var selector = ExSelector()
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return selector }
+
+        // 前缀容错：调用方可能没剥 `@ex:` / `@xpath:`（IBSEngine.parseListEntries
+        // 直接传原始 _list 规则）。不剥会被下面的「@ 开头 = 取值属性」误判吃掉首段，
+        // 首段约束丢失 → 选择器退化成「全页匹配」：
+        // 101Minc `div[@id=allchapter].ul.li` 实际选中全页 707 个 li（正确 690），
+        // 导航链接（首页/排行榜…）混进目录。
+        if trimmed.hasPrefix("@ex:") {
+            trimmed = String(trimmed.dropFirst(4))
+        } else if trimmed.hasPrefix("@xpath:") {
+            trimmed = String(trimmed.dropFirst(7))
+        }
 
         // XPath 形态（真实书源：`//dt[contains(text(),"全部章节")]/following-sibling::a`）
         if let steps = XPathStep.parse(trimmed) {
@@ -93,16 +104,28 @@ struct ExSelector {
         if !current.isEmpty { parts.append((current, descendantFlag)) }
 
         for (i, part) in parts.enumerated() {
-            if part.text.hasPrefix("@") {
+            let isLast = i == parts.count - 1
+            // 取值属性只可能是末段且形如 @text / @href（`@` + 标识符）。
+            // 其余 `@` 开头（含 `@ex:div[...]` 这类带前缀的畸形段）按选择段处理，
+            // 否则会把首段当成取值属性 → segments 少一段 → 退化成全页匹配。
+            if isLast, isValueAttrToken(part.text) {
                 selector.valueAttr = part.text
                 continue
             }
-            let isLast = i == parts.count - 1
-            selector.segments.append(parseSegment(part.text,
+            var text = part.text
+            if text.hasPrefix("@") { text = String(text.dropFirst()) }
+            selector.segments.append(parseSegment(text,
                                                   descendant: part.descendant,
                                                   allowValueAttr: isLast))
         }
         return selector
+    }
+
+    /// `@text` / `@href` / `@alltext` 形态（`@` + 纯标识符）。
+    private static func isValueAttrToken(_ text: String) -> Bool {
+        guard text.hasPrefix("@"), text.count > 1 else { return false }
+        let name = text.dropFirst()
+        return name.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
     }
 
     private static func parseSegment(_ part: String, descendant: Bool,
