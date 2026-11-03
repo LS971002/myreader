@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import Darwin
 
 /// 全局诊断日志：环形缓冲（内存最近 N 条）+ 每日文件持久化 + 导出。
 /// - 自动清理：启动时删除 7 天前的日志文件；单文件超 5MB 截断
@@ -56,6 +57,11 @@ final class AppLog {
         }
         // SIGTRAP(5)：Swift 运行时的数组越界 / 强解包 nil / fatalError 都走 trap，
         // 之前没装 → 「搜索时闪退」这类崩溃一条日志都没有。
+        // 预打开崩溃现场文件（handler 内不能 open / 分配内存）
+        if myreaderCrashTraceFD < 0 {
+            let url = dir.appendingPathComponent("crash-trace.log")
+            myreaderCrashTraceFD = prepareCrashTraceFile(at: url)
+        }
         let signals: [Int32] = [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP]
         for sig in signals {
             // 必须是 C 函数指针（不能捕获上下文）→ 使用文件级函数
@@ -64,8 +70,9 @@ final class AppLog {
     }
 
     /// 崩溃报告写入（同步直写，不经队列——崩溃场景不能依赖异步）。
+    /// 覆盖同一个文件，避免多次崩溃堆成一堆小文件找不到重点。
     func writeCrashReport(_ text: String) {
-        let url = dir.appendingPathComponent("crash-\(Int(Date().timeIntervalSince1970)).log")
+        let url = dir.appendingPathComponent("crash-latest.log")
         try? text.data(using: .utf8)?.write(to: url)
     }
 
@@ -88,6 +95,24 @@ final class AppLog {
     static func info(_ tag: String, _ message: String) { shared.append(.info, tag, message) }
     static func warn(_ tag: String, _ message: String) { shared.append(.warn, tag, message) }
     static func error(_ tag: String, _ message: String) { shared.append(.error, tag, message) }
+
+    /// 同步落盘版本：**排查崩溃时必须用它**。
+    /// 普通 append 是 queue.async，进程被 trap 时队列里还没写的日志全部丢失，
+    /// 所以崩溃现场永远是「最后一条日志之后什么都没有」。
+    static func traceSync(_ tag: String, _ message: String) {
+        shared.appendSync(.debug, tag, message)
+    }
+
+    private func appendSync(_ level: Level, _ tag: String, _ message: String) {
+        let entry = Entry(time: Date(), level: level, tag: tag, message: message)
+        queue.sync {
+            buffer.append(entry)
+            if buffer.count > maxBuffer {
+                buffer.removeFirst(buffer.count - maxBuffer)
+            }
+            writeToFile(entry)
+        }
+    }
 
     private func append(_ level: Level, _ tag: String, _ message: String) {
         let entry = Entry(time: Date(), level: level, tag: tag, message: message)
@@ -241,9 +266,32 @@ final class AppLog {
 
 // MARK: - 致命信号处理器
 
+/// 崩溃现场文件描述符（handler 内只能用它写，不能 new 任何对象）。
+/// 由 AppLog.installCrashHandlers() 预先 open，零捕获。
+private var myreaderCrashTraceFD: Int32 = -1
+
+/// 预打开崩溃现场文件，返回 fd（-1 表示失败）。
+func prepareCrashTraceFile(at url: URL) -> Int32 {
+    let path = url.path
+    return open(path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+}
+
+private func writeRaw(_ text: String, to fd: Int32) {
+    guard fd >= 0 else { return }
+    let bytes = Array(text.utf8)
+    bytes.withUnsafeBufferPointer { buf in
+        guard let base = buf.baseAddress else { return }
+        _ = write(fd, base, buf.count)
+    }
+}
+
 /// 信号处理器参数必须是 C 函数指针，不能捕获任何上下文（闭包捕获会编译失败），
 /// 故定义为文件级函数；处理器内不可安全调用复杂 API，仅做精简记录，
 /// 随后恢复默认处理并重新 raise，保证系统原有崩溃上报不被吞掉。
+///
+/// 关键：Swift 的数组越界 / 强解包 nil / fatalError 都是 brk → SIGTRAP，
+/// 只记信号名等于没记。这里用 backtrace + backtrace_symbols_fd（均为
+/// async-signal-safe）把**调用栈**直接写进预打开的 fd。
 private func myreaderFatalSignalHandler(_ sig: Int32) {
     let name: String
     switch sig {
@@ -255,10 +303,24 @@ private func myreaderFatalSignalHandler(_ sig: Int32) {
     case SIGTRAP: name = "SIGTRAP"
     default: name = "SIG\(sig)"
     }
+
+    let fd = myreaderCrashTraceFD
+    writeRaw("\n===== CRASH（信号 \(name) / thread=\(pthread_main_np() == 1 ? "main" : "background")）=====\n", to: fd)
+
+    // 调用栈（async-signal-safe）
+    var frames = [UnsafeMutableRawPointer?](repeating: nil, count: 96)
+    let count = backtrace(&frames, Int32(frames.count))
+    if count > 0 {
+        writeRaw("--- backtrace（模块/地址/偏移）---\n", to: fd)
+        backtrace_symbols_fd(&frames, count, fd)
+        writeRaw("--- end backtrace ---\n", to: fd)
+    }
+
     let report = """
     ===== CRASH（信号 \(name)）=====
     时间: \(Date())
-    （信号处理器内不可安全调用复杂API，此为精简记录）
+    线程: \(pthread_main_np() == 1 ? "主线程" : "后台线程")
+    调用栈已写入 crash-trace 文件（导出日志可见）
 
     """
     AppLog.shared.writeCrashReport(report)

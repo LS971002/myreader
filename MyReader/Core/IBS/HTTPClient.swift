@@ -229,11 +229,46 @@ final class HTTPClient {
         // 纯 query 相对链接（`?page=2`）：path 取 base 的 path
         if pathPart.isEmpty { pathPart = baseURL.path }
 
+        // 契约式防御：URLComponents 的 path / percentEncodedPath setter 遇到
+        // 非法字符（孤立 %、控制字符、引号）会抛 NSInvalidArgumentException，
+        // Swift 无法 catch → 直接进程崩溃。这里先净化。
+        func sanitizePath(_ raw: String) -> String {
+            var out = ""
+            let scalars = Array(raw.unicodeScalars)
+            var i = 0
+            while i < scalars.count {
+                let s = scalars[i]
+                if s == "%" {
+                    // 只有 %XX(X 为 hex) 才原样保留，否则编码成 %25
+                    if i + 2 < scalars.count,
+                       CharacterSet(charactersIn: "0123456789abcdefABCDEF").contains(scalars[i + 1]),
+                       CharacterSet(charactersIn: "0123456789abcdefABCDEF").contains(scalars[i + 2]) {
+                        out.append("%")
+                        out.append(Character(scalars[i + 1]))
+                        out.append(Character(scalars[i + 2]))
+                        i += 3
+                        continue
+                    }
+                    out += "%25"
+                    i += 1
+                    continue
+                }
+                if s.isASCII, !CharacterSet.controlCharacters.contains(s),
+                   "\"'<>\\^`{|} ".unicodeScalars.contains(s) == false {
+                    out.append(Character(s))
+                } else {
+                    out += s.utf8.map { String(format: "%%%02X", $0) }.joined()
+                }
+                i += 1
+            }
+            return out
+        }
+
         var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
         let pathIsEncoded = pathPart.range(of: "%[0-9A-Fa-f]{2}", options: .regularExpression) != nil
         if pathPart.hasPrefix("/") {
             if pathIsEncoded {
-                comps?.percentEncodedPath = pathPart
+                comps?.percentEncodedPath = sanitizePath(pathPart)
             } else {
                 comps?.path = pathPart
             }
@@ -245,7 +280,7 @@ final class HTTPClient {
                 : (basePath as NSString).deletingLastPathComponent + "/"
             let joined = dir + pathPart
             if pathIsEncoded {
-                comps?.percentEncodedPath = joined
+                comps?.percentEncodedPath = sanitizePath(joined)
             } else {
                 comps?.path = joined
             }
@@ -254,7 +289,7 @@ final class HTTPClient {
         if let queryPart, !queryPart.isEmpty {
             let queryIsEncoded = queryPart.range(of: "%[0-9A-Fa-f]{2}", options: .regularExpression) != nil
             if queryIsEncoded {
-                comps?.percentEncodedQuery = queryPart
+                comps?.percentEncodedQuery = sanitizePath(queryPart)
             } else {
                 // query setter 会保留 & 与 = 当作分隔符，只编码中文/空格等非法字符
                 comps?.query = queryPart

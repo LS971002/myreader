@@ -91,7 +91,9 @@ final class IBSEngine {
         var results: [SearchResult] = []
         var seen = Set<String>()
 
-        for entry in entries.prefix(80) {
+        for (entryIndex, entry) in entries.prefix(80).enumerated() {
+            // 逐项同步打点：崩溃发生在字段求值阶段时，日志最后一行就是出错项/字段
+            AppLog.traceSync("SEARCH", "〔\(source.name)〕项\(entryIndex)/\(entries.count) 求书名")
             var title = runFieldOn(runner, parser: step.parser, name: "bookName",
                                    input: entry.input, node: entry.node) ?? ""
             // 书名清洗：真实书源偶尔把整段简介塞进 title（几十万字），
@@ -103,13 +105,23 @@ final class IBSEngine {
             let key = title + "|" + (fieldRules(step.parser, "dirURL")?.first ?? "")
             if !seen.insert(key).inserted { continue }
 
+            AppLog.traceSync("SEARCH", "〔\(source.name)〕项\(entryIndex) 书名=\(title.prefix(20)) 求dirURL")
             let dirURL = runFieldOn(runner, parser: step.parser, name: "dirURL",
                                     input: entry.input, node: entry.node) ?? ""
             if dirURL.isEmpty {
                 AppLog.warn("SEARCH", "〔\(source.name)〕《\(title.prefix(16))》dirURL为空(规则: \(fieldRules(step.parser, "dirURL")?.first?.prefix(50) ?? "-"))，link兜底为搜索URL")
             }
-            let link = dirURL.isEmpty ? step.finalURL
+            // 101Minc 这类源的 href 形如 `javascript:sovote(123,'/book/x/')`，
+            // 规则若没把前缀剥干净，拼出来的「URL」交给 URLComponents 赋值会抛异常。
+            // 非 http(s) 结果一律回退到搜索页地址，保证 link 始终可请求。
+            var resolvedLink = dirURL.isEmpty ? step.finalURL
                 : HTTPClient.absolute(dirURL, base: step.finalURL.isEmpty ? source.homeURL : step.finalURL)
+            if !(resolvedLink.hasPrefix("http://") || resolvedLink.hasPrefix("https://")) {
+                AppLog.warn("SEARCH", "〔\(source.name)〕《\(title.prefix(16))》链接非法，回退搜索页：\(resolvedLink.prefix(60))")
+                resolvedLink = step.finalURL
+            }
+            let link = resolvedLink
+            AppLog.traceSync("SEARCH", "〔\(source.name)〕项\(entryIndex) dirURL=\(dirURL.prefix(48)) link=\(link.prefix(60)) 求作者")
             let author = runFieldOn(runner, parser: step.parser, name: "author",
                                     input: entry.input, node: entry.node) ?? ""
             // helpId 提取（七猫形态：_BookFields.helpId → 正文组合规则 source.helpId）
@@ -122,6 +134,7 @@ final class IBSEngine {
 
             // 简介/最新章节做长度上限：个别源会取到整页文本，UI 渲染与 Hashable
             // 计算会被拖到秒级（曾表现为「搜索时闪退」）
+            AppLog.traceSync("SEARCH", "〔\(source.name)〕项\(entryIndex) 求简介/封面/最新章节")
             var intro = runFieldOn(runner, parser: step.parser, name: "desc", input: entry.input, node: entry.node) ?? ""
             if intro.count > 800 { intro = String(intro.prefix(800)) }
             var latest = runFieldOn(runner, parser: step.parser, name: "lastChapterTitle", input: entry.input, node: entry.node) ?? ""
