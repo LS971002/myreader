@@ -223,12 +223,13 @@ struct ExSelector {
         var value: String
         if let attr = valueAttr {
             guard let node = nodes.first else { return nil }
-            switch attr {
-            case "@text", "@allText":
+            // 书源里属性名大小写混用（`@text` / `@allText` / `@alltext`），统一小写比较
+            switch attr.lowercased() {
+            case "@text", "@alltext", "@all_text":
                 value = node.textContent
-            case "@ownText":
+            case "@owntext":
                 value = node.ownText
-            case "@html":
+            case "@html", "@outerhtml":
                 value = node.outerHTML()
             default:
                 value = node.attr(String(attr.dropFirst())) ?? ""

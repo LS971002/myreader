@@ -198,25 +198,86 @@ final class HTTPClient {
     }
 
     /// 相对 URL → 绝对（基于书源 homeURL 或当前页）。
-    /// 注意双重编码陷阱（日志实锤）：URLComponents.path setter 期望未编码值，
-    /// 对已含 % 序列的路径会把 % 再编码成 %25（错层 /book/so/%E6... → %25E6... → 401）。
-    /// 已编码路径用 percentEncodedPath 赋值；未编码（含中文）用 path 自动编码。
+    ///
+    /// 两个必须避开的坑（均为日志实锤）：
+    /// 1. 双重编码：`URLComponents.path` setter 期望未编码值，对已含 % 序列的路径
+    ///    会把 % 再编码成 %25（错层 `/book/so/%E6...` → `%25E6...` → 401）。
+    /// 2. **query 被当成 path 编码**：`@dyn:` 规则常产出
+    ///    `/modules/article/search.php?searchkey=xxx&searchtype=all`
+    ///    这类「相对路径 + 自带 query」；整串塞进 path 会把 `?` 编码成 `%3F`
+    ///    （101Minc 实测：`search.php%3Fsearchkey=...` → 404）。
+    ///    因此必须先把 path 与 query 拆开分别赋值。
     static func absolute(_ link: String, base: String) -> String {
         let v = link.trimmingCharacters(in: .whitespacesAndNewlines)
         if v.isEmpty { return "" }
         if v.hasPrefix("http://") || v.hasPrefix("https://") { return v }
         if v.hasPrefix("//") { return "https:" + v }
         guard let baseURL = URL(string: base) else { return v }
-        if v.hasPrefix("/") {
-            var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
-            if v.range(of: "%[0-9A-Fa-f]{2}", options: .regularExpression) != nil {
-                comps?.percentEncodedPath = v
-            } else {
-                comps?.path = v
-            }
-            comps?.query = nil
-            return comps?.url?.absoluteString ?? v
+
+        // 拆分 path / query / fragment
+        var pathPart = v
+        var queryPart: String? = nil
+        var fragmentPart: String? = nil
+        if let hashIndex = pathPart.firstIndex(of: "#") {
+            fragmentPart = String(pathPart[pathPart.index(after: hashIndex)...])
+            pathPart = String(pathPart[pathPart.startIndex..<hashIndex])
         }
-        return URL(string: v, relativeTo: baseURL)?.absoluteString ?? v
+        if let qIndex = pathPart.firstIndex(of: "?") {
+            queryPart = String(pathPart[pathPart.index(after: qIndex)...])
+            pathPart = String(pathPart[pathPart.startIndex..<qIndex])
+        }
+        // 纯 query 相对链接（`?page=2`）：path 取 base 的 path
+        if pathPart.isEmpty { pathPart = baseURL.path }
+
+        var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        let pathIsEncoded = pathPart.range(of: "%[0-9A-Fa-f]{2}", options: .regularExpression) != nil
+        if pathPart.hasPrefix("/") {
+            if pathIsEncoded {
+                comps?.percentEncodedPath = pathPart
+            } else {
+                comps?.path = pathPart
+            }
+        } else {
+            // 相对路径（`book/1.html`）：拼到 base 目录后
+            let basePath = baseURL.path
+            let dir = basePath.hasSuffix("/")
+                ? basePath
+                : (basePath as NSString).deletingLastPathComponent + "/"
+            let joined = dir + pathPart
+            if pathIsEncoded {
+                comps?.percentEncodedPath = joined
+            } else {
+                comps?.path = joined
+            }
+        }
+
+        if let queryPart, !queryPart.isEmpty {
+            let queryIsEncoded = queryPart.range(of: "%[0-9A-Fa-f]{2}", options: .regularExpression) != nil
+            if queryIsEncoded {
+                comps?.percentEncodedQuery = queryPart
+            } else {
+                // query setter 会保留 & 与 = 当作分隔符，只编码中文/空格等非法字符
+                comps?.query = queryPart
+            }
+        } else {
+            comps?.query = nil
+        }
+        comps?.fragment = fragmentPart
+        return comps?.url?.absoluteString ?? v
+    }
+
+    /// 把 `?a=1&b=2` 里未编码的值补编码（`@dyn:` format 产出的 query 常带中文）。
+    static func encodeQueryValues(_ query: String) -> String {
+        query.split(separator: "&", omittingEmptySubsequences: false).map { pair -> String in
+            let parts = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { return String(pair) }
+            let key = String(parts[0])
+            let raw = String(parts[1])
+            if raw.range(of: "%[0-9A-Fa-f]{2}", options: .regularExpression) != nil { return String(pair) }
+            let allowed = CharacterSet(charactersIn:
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
+            let encoded = raw.addingPercentEncoding(withAllowedCharacters: allowed) ?? raw
+            return "\(key)=\(encoded)"
+        }.joined(separator: "&")
     }
 }

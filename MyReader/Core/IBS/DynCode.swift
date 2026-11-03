@@ -32,6 +32,9 @@ final class HeaderStore {
 struct ParentFrame {
     var currentRequestUrl: String = ""
     var respContent: String = ""
+    /// 该层响应头（真实书源：`self.parent.taskObject.session.response.allHeaderFields`
+    /// 用来取 Set-Cookie，101Minc 目录流程依赖它）。
+    var headers: [String: String] = [:]
 }
 
 struct DynSourceRef {
@@ -86,9 +89,10 @@ enum DynValue {
     case classRef(String)
     // 对象图中间节点
     case selfObj
-    case taskObj
-    case sessionObj
-    case respObj
+    /// 参数 = 响应层级：0 = 当前层，n = parentChain[n-1]
+    case taskObj(Int)
+    case sessionObj(Int)
+    case respObj(Int)
     case parentObj(Int)
     case sourceObj
     case sourceChapterObj
@@ -416,12 +420,13 @@ final class DynEngine {
         case .selfObj:
             switch name {
             case "respContent": return .str(ctx.respContent)
-            case "taskObject": return .taskObj
+            case "taskObject": return .taskObj(0)
             case "parent": return .parentObj(0)
             // 真实书源（错层）：`u=format("%@",self.currentRequestUrl);`
             case "currentRequestUrl":
                 return .str(ctx.parentChain.first?.currentRequestUrl ?? "")
             case "responseHeaders": return .headers(ctx.responseHeaders)
+            case "task": return .taskObj(0)
             default: return .null
             }
         case .parentObj(let depth):
@@ -432,14 +437,32 @@ final class DynEngine {
                 return .str(ctx.parentChain.indices.contains(depth) ? ctx.parentChain[depth].currentRequestUrl : "")
             case "respContent":
                 return .str(ctx.parentChain.indices.contains(depth) ? ctx.parentChain[depth].respContent : "")
+            // 101Minc：`self.parent.taskObject.session.response.allHeaderFields`
+            case "taskObject", "task":
+                return .taskObj(depth + 1)
+            case "responseHeaders":
+                return .headers(ctx.parentChain.indices.contains(depth) ? ctx.parentChain[depth].headers : [:])
             default: return .null
             }
-        case .taskObj:
-            return name == "session" ? .sessionObj : .null
-        case .sessionObj:
-            return name == "response" ? .respObj : .null
-        case .respObj:
-            return name == "allHeaderFields" ? .headers(ctx.responseHeaders) : .null
+        case .taskObj(let level):
+            switch name {
+            case "session": return .sessionObj(level)
+            case "response", "resp": return .respObj(level)
+            default: return .null
+            }
+        case .sessionObj(let level):
+            return name == "response" ? .respObj(level) : .null
+        case .respObj(let level):
+            switch name {
+            case "allHeaderFields", "headers", "allHTTPHeaderFields":
+                if level == 0 { return .headers(ctx.responseHeaders) }
+                let index = level - 1
+                return .headers(ctx.parentChain.indices.contains(index)
+                                ? ctx.parentChain[index].headers : [:])
+            case "statusCode", "code":
+                return .str("200")
+            default: return .null
+            }
         case .sourceObj:
             switch name {
             case "configName": return .str(ctx.source.configName)
@@ -459,11 +482,19 @@ final class DynEngine {
             if name == "mutableHTTPRequestHeaders" { return .serializerHeaders(store) }
             return .null
         case .str(let s):
-            if name == "length" { return .num(Double(s.utf16.count)) }
-            // 无参扩展方法（真实书源：`c=c.jxd_replaceUnicode;`）
-            if name == "jxd_replaceUnicode" { return .str(Self.replaceUnicode(s)) }
-            if name == "jxd_trim" { return .str(s.trimmingCharacters(in: .whitespacesAndNewlines)) }
-            return .null
+            // NSString 的无参属性（书源里常以属性形式出现）
+            switch name {
+            case "length": return .num(Double(s.utf16.count))
+            case "jxd_replaceUnicode": return .str(Self.replaceUnicode(s))
+            case "jxd_trim": return .str(s.trimmingCharacters(in: .whitespacesAndNewlines))
+            case "lowercaseString", "lowercased": return .str(s.lowercased())
+            case "uppercaseString", "uppercased": return .str(s.uppercased())
+            case "intValue", "integerValue": return .num(Double(Int(s.trimmingCharacters(in: .whitespaces)) ?? 0))
+            case "doubleValue", "floatValue": return .num(Double(s.trimmingCharacters(in: .whitespaces)) ?? 0)
+            case "capitalizedString": return .str(s.capitalized)
+            case "stringByRemovingPercentEncoding": return .str(s.removingPercentEncoding ?? s)
+            default: return .null
+            }
         case .classRef(let cls):
             switch (cls, name) {
             case ("NSMutableArray", "array"): return .arr(DynArr())
@@ -530,8 +561,66 @@ final class DynEngine {
         return .str(s)
     }
 
+    /// 未识别的 OC 方法记录（去重，只记前 80 条）：
+    /// 这是「书源适配」的自动诊断入口 —— 新书源失败时日志会直接列出缺哪个 selector。
+    private static let unhandledLock = NSLock()
+    private static var unhandledSelectors: Set<String> = []
+
+    private static func noteUnhandled(_ receiver: String, _ selector: String) {
+        let key = "\(receiver).\(selector)"
+        unhandledLock.lock()
+        let isNew = unhandledSelectors.contains(key) == false && unhandledSelectors.count < 80
+        if isNew { unhandledSelectors.insert(key) }
+        unhandledLock.unlock()
+        if isNew {
+            AppLog.warn("JS", "未实现的动态方法: \(key)（该源用到但引擎未支持）")
+        }
+    }
+
+    private func describe(_ value: DynValue) -> String {
+        switch value {
+        case .selfObj: return "self"
+        case .parentObj(let d): return "parent(\(d))"
+        case .taskObj: return "taskObject"
+        case .sessionObj: return "session"
+        case .respObj: return "response"
+        case .sourceObj: return "source"
+        case .sourceChapterObj: return "source.chapter"
+        case .httpObj: return "http"
+        case .httpManagerObj: return "httpManager"
+        case .serializer: return "requestSerializer"
+        case .serializerHeaders: return "mutableHTTPRequestHeaders"
+        case .ruleObj: return "rule"
+        case .headers: return "allHeaderFields"
+        case .str: return "NSString"
+        case .num: return "NSNumber"
+        case .bool: return "BOOL"
+        case .arr: return "NSMutableArray"
+        case .jsContext: return "JSContext"
+        case .jsValue: return "JSValue"
+        case .classRef(let name): return "Class(\(name))"
+        default: return "unknown"
+        }
+    }
+
     private func dispatch(_ receiver: DynValue, selector: String,
                           arg0: DynValue?, labels: [(String, DynValue)]) -> DynValue {
+        let result = dispatchImpl(receiver, selector: selector, arg0: arg0, labels: labels)
+        // 记录未实现的 OC 方法（排除常见的「取不到值」正常场景）
+        if case .null = result {
+            let ignorable: Set<String> = [
+                "objectForKey", "valueForKey", "get", "toString", "lastObject", "firstObject",
+                "count", "length", "description", "isEqualToString"
+            ]
+            if !ignorable.contains(selector) {
+                Self.noteUnhandled(describe(receiver), selector)
+            }
+        }
+        return result
+    }
+
+    private func dispatchImpl(_ receiver: DynValue, selector: String,
+                              arg0: DynValue?, labels: [(String, DynValue)]) -> DynValue {
         switch receiver {
         case .ruleObj:
             if selector == "get", let key = arg0 {
@@ -568,6 +657,27 @@ final class DynEngine {
                 let from = arg0?.stringValue ?? ""
                 let to = labels.first { $0.0 == "withString" }?.1.stringValue ?? ""
                 return .str(s.replacingOccurrences(of: from, with: to))
+            case "stringByAppendingString", "appending":
+                return .str(s + (arg0?.stringValue ?? ""))
+            case "isEqualToString":
+                return .bool(s == (arg0?.stringValue ?? ""))
+            case "hasPrefix":
+                return .bool(s.hasPrefix(arg0?.stringValue ?? ""))
+            case "hasSuffix":
+                return .bool(s.hasSuffix(arg0?.stringValue ?? ""))
+            case "rangeOfString":
+                let token = arg0?.stringValue ?? ""
+                guard !token.isEmpty, let r = s.range(of: token) else { return .null }
+                return .str(String(s.distance(from: s.startIndex, to: r.lowerBound)))
+            case "stringByAddingPercentEncoding":
+                // NSCharacterSet 参数不解析，统一按「URL 值编码」
+                let allowed = CharacterSet(charactersIn:
+                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
+                return .str(s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s)
+            case "stringByRemovingPercentEncoding":
+                return .str(s.removingPercentEncoding ?? s)
+            case "dataUsingEncoding":
+                return .str(s)
             default:
                 return .null
             }
@@ -598,12 +708,28 @@ final class DynEngine {
             return .null
 
         case .arr(let box):
-            if selector == "addObject" {
+            switch selector {
+            case "addObject":
                 box.items.append(arg0 ?? .null)
                 return .null
+            case "count":
+                return .num(Double(box.items.count))
+            case "objectAtIndex", "objectAtIndexedSubscript":
+                let index = Int(arg0?.stringValue ?? "0") ?? 0
+                return box.items.indices.contains(index) ? box.items[index] : .null
+            case "firstObject":
+                return box.items.first ?? .null
+            case "lastObject":
+                return box.items.last ?? .null
+            case "componentsJoinedByString", "joined":
+                let sep = arg0?.stringValue ?? ""
+                return .str(box.items.map(\.stringValue).joined(separator: sep))
+            case "removeAllObjects":
+                box.items.removeAll()
+                return .null
+            default:
+                return .null
             }
-            if selector == "count" { return .num(Double(box.items.count)) }
-            return .null
 
         case .jsContext(let js):
             switch selector {
@@ -640,6 +766,22 @@ final class DynEngine {
         case .classRef("JxdSecuritySub"):
             if selector == "Utf8Encoded", let input = arg0 {
                 return .str(percentEncode(input.stringValue))
+            }
+            if selector == "Base64Encode", let input = arg0 {
+                return .str(Data(input.stringValue.utf8).base64EncodedString())
+            }
+            if selector == "Base64Decode", let input = arg0 {
+                guard let data = Data(base64Encoded: input.stringValue
+                    .trimmingCharacters(in: .whitespacesAndNewlines)) else { return .null }
+                return .str(String(data: data, encoding: .utf8) ?? "")
+            }
+            if selector == "SHA1", let input = arg0 {
+                let digest = Insecure.SHA1.hash(data: Data(input.stringValue.utf8))
+                return .str(digest.map { String(format: "%02x", $0) }.joined())
+            }
+            if selector == "MD5Upper", let input = arg0 {
+                let digest = Insecure.MD5.hash(data: Data(input.stringValue.utf8))
+                return .str(digest.map { String(format: "%02X", $0) }.joined())
             }
             // JxdSecuritySub.MD5:query —— UTF8字节MD5，hex小写（七猫sign等签名场景）
             if selector == "MD5", let input = arg0 {

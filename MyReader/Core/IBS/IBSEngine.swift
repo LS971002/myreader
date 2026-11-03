@@ -578,7 +578,7 @@ final class IBSEngine {
             }
         }
 
-        let frame = ParentFrame(currentRequestUrl: finalURL, respContent: text)
+        let frame = ParentFrame(currentRequestUrl: finalURL, respContent: text, headers: headers)
         let frames = [frame] + parentFrames
 
         // 5. middleHandle 递归（子层脚本 self.parent.* 由 parentChain 承载）
