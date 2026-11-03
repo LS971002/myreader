@@ -19,7 +19,7 @@ struct SourceSwitchSheet: View {
                 Section {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(model.book.name).font(.headline)
-                        Text("当前源：\(model.book.sourceName ?? "无")")
+                        Text("当前源：\(model.book.sourceName.isEmpty ? "无" : model.book.sourceName)")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }

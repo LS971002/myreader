@@ -461,7 +461,10 @@ final class DynEngine {
             switch (cls, name) {
             case ("NSMutableArray", "array"): return .arr(DynArr())
             case ("JSContext", "alloc"), ("JSContext", "init"):
-                let js = JSContext()
+                guard let js = JSContext() else {
+                    AppLog.error("JS", "JSContext创建失败")
+                    return .null
+                }
                 // JS异常处理器：未捕获JS异常→日志（如CryptoJS解密失败）
                 js.exceptionHandler = { _, exception in
                     AppLog.error("JS", "JS异常: \(exception?.toString() ?? "?")")
@@ -471,7 +474,8 @@ final class DynEngine {
             }
         case .jsContext:
             // JSContext.alloc.init 链：init 再次产生可用实例
-            return name == "init" ? .jsContext(JSContext()) : .null
+            if name == "init", let js = JSContext() { return .jsContext(js) }
+            return .null
         case .headers(let h):
             if name == "allHeaderFields" { return .headers(h) }
             return .null
@@ -599,11 +603,15 @@ final class DynEngine {
             case "evaluateScript":
                 let code = arg0?.stringValue ?? ""
                 let value = js.evaluateScript(code)
-                if value == nil || (value?.isNull ?? true) {
-                    AppLog.warn("JS", "evaluateScript无返回（脚本前80: \(code.prefix(80))）")
-                }
                 if let e = js.objectForKeyedSubscript("__jsError__"), !e.isNull {
                     AppLog.error("JS", "JS执行异常: \(e.toString() ?? "?")")
+                }
+                guard let value = value else {
+                    AppLog.warn("JS", "evaluateScript无返回（脚本前80: \(code.prefix(80))）")
+                    return .null
+                }
+                if value.isNull {
+                    AppLog.warn("JS", "evaluateScript返回null（脚本前80: \(code.prefix(80))）")
                 }
                 return .jsValue(value)
             case "objectForKeyedSubscript":

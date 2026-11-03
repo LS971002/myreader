@@ -88,7 +88,7 @@ enum BookActions {
 
     /// 换源：切换书源重新解析目录（正文缓存按旧源磁盘文件保留，索引对得上的章节直接复用）。
     static func changeSource(book: Book, to newSource: IBSBookSource, store: Store) async throws -> Book {
-        AppLog.info("SOURCE", "换源：\(book.name) \(book.sourceName ?? "?") → \(newSource.name)")
+        AppLog.info("SOURCE", "换源：\(book.name) \(book.sourceName.isEmpty ? "?" : book.sourceName) → \(newSource.name)")
         var updated = book
         updated.sourceID = newSource.id
         updated.sourceName = newSource.name
