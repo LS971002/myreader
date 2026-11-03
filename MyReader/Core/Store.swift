@@ -184,22 +184,32 @@ final class Store: ObservableObject {
     }
 
     func addBook(_ book: Book) {
+        // 同一本书（同 id 或 同书名同作者）只保留一条记录：不同源也只是换源，
+        // 不允许书架出现两本同名书（用户明确要求）。
         if let idx = books.firstIndex(where: {
-            $0.name == book.name && $0.author == book.author && $0.sourceID == book.sourceID
+            $0.id == book.id || ($0.name == book.name && BookActions.sameAuthor($0.author, book.author))
         }) {
-            // 旧记录残缺（0章 / 无 helpId）时用新解析结果补齐，否则新加入的目录与
-            // helpId 会被静默丢弃 → 正文 `id=` 为空 → 空白正文。
-            if books[idx].chapters.isEmpty && !book.chapters.isEmpty {
-                let keepID = books[idx].id
-                books[idx] = book
-                books[idx].id = keepID
-                books[idx].currentChapter = min(books[idx].currentChapter,
-                                                max(0, book.chapters.count - 1))
-                AppLog.info("STORE", "《\(book.name.prefix(16))》旧记录0章，已用新解析结果替换（\(book.chapters.count)章）")
-            } else if books[idx].helpId.isEmpty && !book.helpId.isEmpty {
-                books[idx].helpId = book.helpId
+            var merged = book
+            let old = books[idx]
+            merged.id = old.id                         // 复用 id：章节缓存/书签/进度都挂在它上面
+            merged.createdAt = old.createdAt
+            merged.groupID = old.groupID
+            merged.stick = old.stick
+            merged.lastReadAt = Date()
+            merged.currentPage = old.currentPage
+            // 只有「同一源且章节数一致」才保留原进度；换源时进度已由
+            // BookActions 按标题对齐好，直接采用传入值。
+            if old.sourceID == book.sourceID, !book.chapters.isEmpty,
+               old.chapters.count == book.chapters.count {
+                merged.currentChapter = min(old.currentChapter, book.chapters.count - 1)
             }
-            books[idx].lastReadAt = Date()
+            merged.currentChapter = min(merged.currentChapter, max(0, book.chapters.count - 1))
+            if old.chapters.isEmpty {
+                AppLog.info("STORE", "《\(book.name.prefix(16))》旧记录0章，已用新解析结果替换（\(book.chapters.count)章）")
+            } else if old.sourceID != book.sourceID {
+                AppLog.info("STORE", "《\(book.name.prefix(16))》换源更新（\(old.sourceName) → \(book.sourceName)，\(old.chapters.count)→\(book.chapters.count)章）")
+            }
+            books[idx] = merged
         } else {
             books.insert(book, at: 0)
         }

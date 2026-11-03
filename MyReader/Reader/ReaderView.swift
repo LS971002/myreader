@@ -11,13 +11,7 @@ struct ReaderView: View {
     @State private var showCatalog = false
     @State private var showSettings = false
     @State private var showSourceSwitch = false
-    @State private var dragOffset: CGFloat = 0
-    @State private var isTurning = false            // 翻页动画进行中（防重入）
-    @State private var zombieGesture = false        // 动画期间开始的手势会话 → 整段作废
-    /// 翻页完成后的短冷却截止时刻：一次物理滑动被SwiftUI拆成两个手势会话时，
-    /// 第二会话在此期间开始 → zombie 屏蔽（防连翻两页）。
-    @State private var cooldownUntil = Date.distantPast
-    /// 文本选择模式：开启后暂停翻页手势，正文换成可长按选字的 UITextView。
+    /// 文本选择模式：开启后正文换成可长按选字的 UITextView。
     @State private var selecting = false
     @State private var toast: String?
 
@@ -35,14 +29,12 @@ struct ReaderView: View {
                 width: geo.size.width - horizontal * 2,
                 height: geo.size.height - bottomInset - 30
             )
-            let pageWidth = geo.size.width
-
             ZStack {
                 theme.current.background.ignoresSafeArea()
 
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
-                    pageContent(width: pageWidth)
+                    pageContent(size: contentSize)
                         .frame(width: contentSize.width, height: contentSize.height, alignment: .topLeading)
                         .clipped()
                         // 菜单出现时正文缩放居中：完整可见，不被上下菜单遮挡
@@ -93,51 +85,6 @@ struct ReaderView: View {
                         .transition(.opacity)
                 }
             }
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        guard settings.pageTurn != .scroll else { return }
-                        // 动画期间/冷却期内开始的手势会话：整段作废（防拆会话双翻）
-                        if isTurning || Date() < cooldownUntil {
-                            zombieGesture = true
-                            return
-                        }
-                        dragOffset = max(-pageWidth, min(pageWidth, value.translation.width))
-                    }
-                    .onEnded { value in
-                        guard settings.pageTurn != .scroll else { return }
-                        if zombieGesture {
-                            zombieGesture = false
-                            return
-                        }
-                        guard !isTurning else { return }
-                        // 用本会话自身位移判定（不用 dragOffset 残留）
-                        let dx = value.translation.width
-                        if abs(dx) < 12, abs(value.translation.height) < 12 {
-                            handleTap(x: value.location.x, width: geo.size.width)
-                            dragOffset = 0
-                            return
-                        }
-                        dragOffset = max(-pageWidth, min(pageWidth, dx))
-                        // 速度加成：快速轻扫也翻页
-                        let velocity = value.predictedEndTranslation.width - value.translation.width
-                        let shouldTurn = dx < -pageWidth * 0.32 || velocity < -pageWidth * 0.6
-                        let shouldBack = dx > pageWidth * 0.32 || velocity > pageWidth * 0.6
-                        if shouldTurn {
-                            finishTurn(forward: true, width: pageWidth)
-                        } else if shouldBack {
-                            finishTurn(forward: false, width: pageWidth)
-                        } else {
-                            // 回弹
-                            withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
-                                dragOffset = 0
-                            }
-                        }
-                    },
-                // 选择模式下整体禁用翻页手势，把触摸让给 UITextView 的选字/菜单
-                including: selecting ? .none : .all
-            )
             .onAppear {
                 model.updateLayout(size: contentSize)
                 model.onAppear()
@@ -167,10 +114,10 @@ struct ReaderView: View {
         }
     }
 
-    // MARK: - 正文（双邻页跟手）
+    // MARK: - 正文
 
     @ViewBuilder
-    private func pageContent(width: CGFloat) -> some View {
+    private func pageContent(size: CGSize) -> some View {
         if selecting {
             // 选择模式：正文渲染为可选 UITextView（长按/双击选字，系统菜单可拷贝）。
             // 上下滚动模式下给整章文本并允许滚动，分页模式只给当前页。
@@ -188,59 +135,25 @@ struct ReaderView: View {
                            theme: theme.current)
                     .frame(width: nil)
             }
+            .onTapGesture { withAnimation { showMenu.toggle() } }
         } else {
-            ZStack(alignment: .topLeading) {
-                // 左邻页（章内上一页 / 上一章末页）
-                neighborPage(edge: .leading, width: width)
-
-                // 右邻页（章内下一页 / 下一章首页）
-                neighborPage(edge: .trailing, width: width)
-
-                // 当前页：拖拽/点击翻页统一走 offset 跟手动画。
-                // 不再用 `.id()` + move transition —— 那会在每次翻页销毁并重建
-                // UILabel，连翻时每页都要重新排版 + 重建视图，是卡顿主因。
-                PageCanvas(text: currentPageText,
-                           settings: settings,
-                           theme: theme.current)
-                    .offset(x: dragOffset)
-            }
-            .allowsHitTesting(false)
-        }
-    }
-
-    @ViewBuilder
-    private func neighborPage(edge: Edge, width: CGFloat) -> some View {
-        let isLeading = edge == .leading
-        let offsetBase: CGFloat = isLeading ? -width : width
-
-        if isLeading {
-            if let text = model.neighborPrev {
-                PageCanvas(text: text, settings: settings, theme: theme.current)
-                    .offset(x: offsetBase + dragOffset)
-            } else if let chapter = model.neighborChapterPrev {
-                PageCanvas(text: chapter.text, settings: settings, theme: theme.current)
-                    .overlay(alignment: .top) {
-                        chapterHint("上一章 · \(chapter.title)")
-                    }
-                    .offset(x: offsetBase + dragOffset)
-            } else if let title = model.chapterTitlePrev {
-                chapterPlaceholder("上一章", title: title)
-                    .offset(x: offsetBase + dragOffset)
-            }
-        } else {
-            if let text = model.neighborNext {
-                PageCanvas(text: text, settings: settings, theme: theme.current)
-                    .offset(x: offsetBase + dragOffset)
-            } else if let chapter = model.neighborChapterNext {
-                PageCanvas(text: chapter.text, settings: settings, theme: theme.current)
-                    .overlay(alignment: .top) {
-                        chapterHint("下一章 · \(chapter.title)")
-                    }
-                    .offset(x: offsetBase + dragOffset)
-            } else if let title = model.chapterTitleNext {
-                chapterPlaceholder("下一章", title: title)
-                    .offset(x: offsetBase + dragOffset)
-            }
+            // 分页：交给 UIScrollView(isPagingEnabled) 原生分页。
+            // SwiftUI 侧不再有 DragGesture / offset / transition，拖动时
+            // 不触发任何 body 重算，翻页由 UIKit 直接提交 CALayer 位移。
+            PagedPagesView(
+                pages: model.pages,
+                index: model.pageIndex,
+                settings: settings,
+                theme: theme.current,
+                pageSize: size,
+                tapToTurn: settings.tapToTurn,
+                onIndexChange: { model.setPage($0) },
+                onOverflow: { forward in
+                    guard !model.loading else { return }
+                    if forward { model.goNextChapter() } else { model.goPreviousChapter() }
+                },
+                onCenterTap: { withAnimation { showMenu.toggle() } }
+            )
         }
     }
 
@@ -255,76 +168,6 @@ struct ReaderView: View {
 
     private var currentPageText: String {
         model.pages.indices.contains(model.pageIndex) ? model.pages[model.pageIndex] : ""
-    }
-
-    private func chapterHint(_ text: String) -> some View {
-        Text(text)
-            .font(.caption)
-            .foregroundStyle(theme.current.secondary)
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(theme.current.background.opacity(0.9), in: Capsule())
-            .padding(.top, -26)
-    }
-
-    private func chapterPlaceholder(_ label: String, title: String) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: label == "上一章" ? "chevron.up" : "chevron.down")
-                .font(.title2)
-                .foregroundStyle(theme.current.secondary)
-            Text("\(label)：\(title)")
-                .font(.subheadline)
-                .foregroundStyle(theme.current.secondary)
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
-            Text("松手进入")
-                .font(.caption2)
-                .foregroundStyle(theme.current.secondary.opacity(0.6))
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    // MARK: - 翻页动画
-
-    /// 翻页完成（拖拽松手 / 点击）：邻页已跟手滑入 → 提交翻页 → 归零，无缝停留。
-    private func finishTurn(forward: Bool, width: CGFloat) {
-        guard !isTurning else { return }
-        isTurning = true
-        let target: CGFloat = forward ? -width : width
-
-        // 章末/章首越界：翻的是章节
-        let crossForward = forward && model.neighborNext == nil
-        let crossBack = !forward && model.neighborPrev == nil
-
-        // 0.22s：比原先 0.30s 更快，连翻时手感更跟手
-        withAnimation(.spring(response: 0.22, dampingFraction: 1.0)) {
-            dragOffset = target
-        }
-
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 220_000_000)
-            // 切页与归零放在同一帧、且禁用动画：避免中间出现一帧「页面已滑出但新页未就位」的空白
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                if crossForward {
-                    model.goNextChapter()
-                } else if crossBack {
-                    model.goPreviousChapter()
-                } else {
-                    if forward { model.nextPage() } else { model.prevPage() }
-                }
-                dragOffset = 0
-            }
-            isTurning = false
-            // 冷却期：吸收同一次物理滑动的残余手势会话（连翻间隔尽量短）
-            cooldownUntil = Date().addingTimeInterval(0.08)
-        }
-    }
-
-    /// 点击翻页：与拖拽共用同一套 offset 动画（当前页滑出 → 切页 → 归零）。
-    /// 不用 move 转场，避免每次翻页重建整页 UILabel。
-    private func tapTurn(forward: Bool, width: CGFloat) {
-        finishTurn(forward: forward, width: width)
     }
 
     // MARK: - 状态栏
@@ -471,24 +314,246 @@ struct ReaderView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - 点击
+}
 
-    private func handleTap(x: CGFloat, width: CGFloat) {
-        if showMenu {
-            withAnimation { showMenu = false }
-            return
+// MARK: - 原生分页正文（UIScrollView）
+
+/// 用 UIScrollView(isPagingEnabled) 承载页面：拖动由 UIKit 直接提交图层位移，
+/// 期间 SwiftUI 不参与计算 —— 连续滑动翻页不再掉帧。
+/// 只在「当前页 ±1」保留 UILabel（切页时预渲染下一张），翻页过程零重建。
+struct PagedPagesView: UIViewRepresentable {
+    let pages: [String]
+    let index: Int
+    let settings: AppSettings
+    let theme: ReaderTheme
+    let pageSize: CGSize
+    let tapToTurn: Bool
+    let onIndexChange: (Int) -> Void
+    /// 越过首/末页：true = 向后（下一章），false = 向前（上一章）
+    let onOverflow: (Bool) -> Void
+    let onCenterTap: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> UIScrollView {
+        let scrollView = UIScrollView()
+        scrollView.isPagingEnabled = true
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.alwaysBounceHorizontal = true
+        scrollView.bounces = true
+        scrollView.backgroundColor = .clear
+        scrollView.contentInsetAdjustmentBehavior = .never
+        scrollView.delegate = context.coordinator
+
+        let tap = UITapGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.handleTap(_:)))
+        tap.delegate = context.coordinator
+        scrollView.addGestureRecognizer(tap)
+
+        context.coordinator.attach(scrollView)
+        return scrollView
+    }
+
+    func updateUIView(_ scrollView: UIScrollView, context: Context) {
+        context.coordinator.update(with: self, scrollView: scrollView)
+    }
+
+    // MARK: 协调器
+
+    final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
+        private var parent: PagedPagesView
+        private weak var scrollView: UIScrollView?
+        private var labels: [Int: UILabel] = [:]
+        /// 每页已渲染的排版 key：内容不变就不重新给 UILabel 赋 attributedText
+        private var labelKeys: [Int: String] = [:]
+        private var signature = ""
+        private var currentIndex = 0
+        private var overflowFired = false
+        private var isProgrammatic = false
+
+        init(_ parent: PagedPagesView) {
+            self.parent = parent
         }
-        guard settings.tapToTurn else {
-            withAnimation { showMenu = true }
-            return
+
+        func attach(_ scrollView: UIScrollView) {
+            self.scrollView = scrollView
+            reload(scrollView)
         }
-        let third = width / 3
-        if x < third {
-            tapTurn(forward: false, width: width)
-        } else if x > width - third {
-            tapTurn(forward: true, width: width)
-        } else {
-            withAnimation { showMenu = true }
+
+        func update(with parent: PagedPagesView, scrollView: UIScrollView) {
+            self.parent = parent
+            self.scrollView = scrollView
+
+            let sig = signature(for: parent)
+            if sig != signature {
+                signature = sig
+                reload(scrollView)
+                return
+            }
+            if currentIndex != parent.index {
+                currentIndex = min(max(0, parent.index), max(0, parent.pages.count - 1))
+                layoutWindow()
+                setOffset(to: currentIndex, animated: false)
+            }
+        }
+
+        /// 页面内容 / 排版参数 / 尺寸变化都要重建。
+        private func signature(for parent: PagedPagesView) -> String {
+            let contentHash = parent.pages.reduce(0) { $0 &+ $1.hashValue }
+            return "\(parent.pages.count)|\(contentHash)|\(Int(parent.pageSize.width))x\(Int(parent.pageSize.height))"
+                + "|\(parent.settings.fontSize)|\(parent.settings.lineSpacing)"
+                + "|\(parent.settings.paragraphSpacing)|\(parent.settings.fontName)"
+                + "|\(parent.settings.bold)|\(parent.settings.indentFirstLine)"
+                + "|\(parent.theme.text.description)"
+        }
+
+        private func reload(_ scrollView: UIScrollView) {
+            overflowFired = false
+            currentIndex = min(max(0, parent.index), max(0, parent.pages.count - 1))
+            let width = max(1, parent.pageSize.width)
+            let height = max(1, parent.pageSize.height)
+
+            // 清掉不在窗口内的页
+            let window = validWindow()
+            for (page, label) in labels where !window.contains(page) {
+                label.removeFromSuperview()
+                labels[page] = nil
+                labelKeys[page] = nil
+            }
+            scrollView.contentSize = CGSize(width: width * CGFloat(max(parent.pages.count, 1)),
+                                            height: height)
+            layoutWindow()
+            setOffset(to: currentIndex, animated: false)
+        }
+
+        private func validWindow() -> Set<Int> {
+            var result = Set<Int>()
+            for offset in -1...1 {
+                let page = currentIndex + offset
+                if parent.pages.indices.contains(page) { result.insert(page) }
+            }
+            return result
+        }
+
+        /// 只保留 当前页 / 上一页 / 下一页 三张 UILabel。
+        private func layoutWindow() {
+            let width = max(1, parent.pageSize.width)
+            let height = max(1, parent.pageSize.height)
+            let window = validWindow()
+            for (page, label) in labels where !window.contains(page) {
+                label.removeFromSuperview()
+                labels[page] = nil
+                labelKeys[page] = nil
+            }
+            for page in window {
+                let label = labels[page] ?? makeLabel()
+                labels[page] = label
+                label.frame = CGRect(x: CGFloat(page) * width, y: 0, width: width, height: height)
+
+                let text = parent.pages[page]
+                let key = "\(text.hashValue)|\(text.count)|\(parent.settings.fontSize)"
+                    + "|\(parent.settings.lineSpacing)|\(parent.settings.paragraphSpacing)"
+                    + "|\(parent.settings.fontName)|\(parent.settings.bold)"
+                    + "|\(parent.settings.indentFirstLine)|\(parent.theme.text.description)"
+                guard labelKeys[page] != key else { continue }
+                labelKeys[page] = key
+                label.attributedText = Typography.attributedCached(
+                    text, settings: parent.settings, color: UIColor(parent.theme.text), title: nil)
+            }
+        }
+
+        private func makeLabel() -> UILabel {
+            let label = UILabel()
+            label.numberOfLines = 0
+            label.lineBreakMode = .byWordWrapping
+            label.backgroundColor = .clear
+            label.isUserInteractionEnabled = false
+            scrollView?.addSubview(label)
+            return label
+        }
+
+        private func setOffset(to page: Int, animated: Bool) {
+            guard let scrollView else { return }
+            let width = max(1, parent.pageSize.width)
+            isProgrammatic = true
+            scrollView.setContentOffset(CGPoint(x: CGFloat(page) * width, y: 0), animated: animated)
+            if !animated { isProgrammatic = false }
+        }
+
+        // MARK: UIScrollViewDelegate
+
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            guard !isProgrammatic, !overflowFired, !parent.pages.isEmpty else { return }
+            let x = scrollView.contentOffset.x
+            let maxX = max(0, scrollView.contentSize.width - scrollView.bounds.width)
+            if x < -60 {
+                overflowFired = true
+                parent.onOverflow(false)
+            } else if x > maxX + 60 {
+                overflowFired = true
+                parent.onOverflow(true)
+            }
+        }
+
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+            isProgrammatic = false
+            overflowFired = false
+            commit(scrollView)
+        }
+
+        func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+            isProgrammatic = false
+            overflowFired = false
+            commit(scrollView)
+        }
+
+        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            if !decelerate {
+                overflowFired = false
+                commit(scrollView)
+            }
+        }
+
+        private func commit(_ scrollView: UIScrollView) {
+            let width = max(1, parent.pageSize.width)
+            let page = Int(round(scrollView.contentOffset.x / width))
+            let clamped = min(max(0, page), max(0, parent.pages.count - 1))
+            guard clamped != currentIndex else { return }
+            currentIndex = clamped
+            layoutWindow()
+            parent.onIndexChange(clamped)
+        }
+
+        // MARK: 点击
+
+        @objc func handleTap(_ gesture: UITapGestureRecognizer) {
+            guard let scrollView else { return }
+            let width = max(1, parent.pageSize.width)
+            let x = gesture.location(in: scrollView).x - scrollView.contentOffset.x
+
+            guard parent.tapToTurn else {
+                parent.onCenterTap()
+                return
+            }
+            if x < width / 3 {
+                if currentIndex <= 0 { parent.onOverflow(false) } else { turn(to: currentIndex - 1) }
+            } else if x > width * 2 / 3 {
+                if currentIndex >= parent.pages.count - 1 { parent.onOverflow(true) } else { turn(to: currentIndex + 1) }
+            } else {
+                parent.onCenterTap()
+            }
+        }
+
+        private func turn(to page: Int) {
+            currentIndex = page
+            layoutWindow()
+            setOffset(to: page, animated: true)
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
         }
     }
 }

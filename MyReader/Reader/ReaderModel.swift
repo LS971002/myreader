@@ -206,6 +206,15 @@ final class ReaderModel: ObservableObject {
 
     // MARK: - 翻页
 
+    /// UIScrollView 分页回调：翻页（不重新加载章节，只更新进度）。
+    func setPage(_ index: Int) {
+        guard pages.indices.contains(index), index != pageIndex else { return }
+        lastJumpForward = index > pageIndex
+        pageIndex = index
+        book.currentPage = index
+        persistProgress()
+    }
+
     func nextPage() {
         lastJumpForward = true
         if pageIndex + 1 < pages.count {

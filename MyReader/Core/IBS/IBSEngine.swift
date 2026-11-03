@@ -177,6 +177,8 @@ final class IBSEngine {
         // 首次请求以 link 为目标，后续翻页由 nextPageUrl 求值替换。
         var overrideURL: String? = link
         var seenTitles = Set<String>()
+        var firstPageText = ""
+        var firstPageBase = ""
         let maxPages = max(node.maxPageCount, 1)
 
         for pageIndex in 0..<min(maxPages, 40) {
@@ -202,20 +204,33 @@ final class IBSEngine {
                 let dom = HTMLParser.parse(step.text)
                 entries = ExSelector.parse(listRule).select(from: dom).map { ($0.textContent, $0) }
             }
-            AppLog.info("DIR", "〔\(source.name)〕第\(pageIndex + 1)页列表项 \(entries.count) 个（\(listRule.hasPrefix("@json:") ? "JSON" : "DOM")模式）")
+            AppLog.info("DIR", "〔\(source.name)〕第\(pageIndex + 1)页列表项 \(entries.count) 个（\(listRule.hasPrefix("@json:") ? "JSON" : "DOM")模式）"
+                        + (entries.isEmpty ? " _list: \(listRule.prefix(90))" : ""))
+            firstPageText = firstPageText.isEmpty ? step.text : firstPageText
+            firstPageBase = firstPageBase.isEmpty
+                ? (step.finalURL.isEmpty ? source.homeURL : step.finalURL) : firstPageBase
             if entries.isEmpty { break }
 
+            var emptyFieldSample = ""
             for entry in entries {
                 let title = runFieldOn(runner, parser: step.parser, name: "title",
                                        input: entry.input, node: entry.node) ?? ""
                 let url = runFieldOn(runner, parser: step.parser, name: "url",
                                      input: entry.input, node: entry.node) ?? ""
+                if emptyFieldSample.isEmpty && (title.isEmpty || url.isEmpty) {
+                    let node = entry.node
+                    emptyFieldSample = "首项 title=「\(title.prefix(20))」url=「\(url.prefix(40))」"
+                        + " 节点=\(node.map { "<\($0.tag)> 文本:\($0.textContent.prefix(24))" } ?? "json")"
+                }
                 guard !title.isEmpty, !url.isEmpty else { continue }
                 if !seenTitles.insert(title).inserted { continue }
                 chapters.append(Chapter(
                     index: chapters.count,
                     title: title,
                     url: HTTPClient.absolute(url, base: step.finalURL.isEmpty ? source.homeURL : step.finalURL)))
+            }
+            if !emptyFieldSample.isEmpty {
+                AppLog.warn("DIR", "〔\(source.name)〕列表项字段缺失 \(emptyFieldSample)")
             }
 
             // 下一页（nextPageUrl 脚本读取 helpId 存入的 next0 / next1）
@@ -238,8 +253,136 @@ final class IBSEngine {
                 break
             }
         }
+        // 通用兜底：_list 规则没命中 / 命中了但字段取不到（真实书源常见：
+        // `@xpath://dt[...]/following-sibling::a` 这类结构规则在不同站点变体下失效）。
+        // 做法：直接扫描整页 <a>，按「与详情页同目录 + 章节链接形态」筛选并排序。
+        if chapters.isEmpty && !firstPageText.isEmpty {
+            let fallback = Self.fallbackChapterLinks(from: firstPageText,
+                                                     baseURL: firstPageBase,
+                                                     detailURL: link)
+            if !fallback.isEmpty {
+                AppLog.warn("DIR", "〔\(source.name)〕_list未命中，整页链接兜底：\(fallback.count) 章")
+                chapters = fallback
+            }
+        }
         AppLog.info("DIR", "〔\(source.name)〕目录完成：\(chapters.count) 章")
         return chapters
+    }
+
+    // MARK: - 目录整页兜底
+
+    /// 从整页 HTML 里提取章节链接（书源规则失效时的通用兜底）。
+    /// 判定：与详情页同目录前缀（`/book/160069/xxx.html`）或形如 `123456.html`，
+    /// 标题含章节语义或至少 2 字，排除导航/翻页/推荐类链接，最后按「第N章」数字排序。
+    static func fallbackChapterLinks(from text: String, baseURL: String,
+                                     detailURL: String) -> [Chapter] {
+        guard text.contains("<a"), !text.isEmpty else { return [] }
+        let dom = HTMLParser.parse(text)
+        let prefix = chapterPathPrefix(detailURL)
+        let host = URL(string: detailURL)?.host ?? ""
+
+        let navigation: Set<String> = [
+            "上一页", "下一页", "上一章", "下一章", "目录", "章节目录", "首页", "返回",
+            "加入书签", "添加书签", "推荐", "排行榜", "全部", "查看更多", "展开", "收起",
+            "电脑版", "手机版", "书架", "登录", "注册",
+            // 「开始阅读 / 马上阅读」这类按钮指向第 1 章，会把真正的第 1 章挤掉
+            "开始阅读", "马上阅读", "立即阅读", "继续阅读", "在线阅读", "立即畅读",
+            "加入书架", "投票推荐", "催更", "举报", "投推荐票", "下载APP"
+        ]
+
+        var items: [(title: String, url: String, order: Int?)] = []
+
+        for node in dom.elements() where node.tag == "a" {
+            guard let raw = node.attr("href")?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty,
+                  !raw.hasPrefix("#"), !raw.hasPrefix("javascript"), !raw.hasPrefix("mailto") else { continue }
+            let url = HTTPClient.absolute(raw, base: baseURL.isEmpty ? detailURL : baseURL)
+            guard !url.isEmpty else { continue }
+            if !host.isEmpty, let u = URL(string: url), !u.host.isEmpty, u.host != host { continue }
+
+            var title = node.textContent
+                .replacingOccurrences(of: "\u{3000}", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if title.isEmpty { continue }
+            title = title.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+            guard title.count >= 2, title.count <= 60 else { continue }
+            if navigation.contains(where: { title.hasPrefix($0) || title == $0 }) { continue }
+
+            let path = URL(string: url)?.path ?? ""
+            let sameFolder = !prefix.isEmpty && path.hasPrefix(prefix) && path != prefix
+            let looksChapter = path.range(of: #"/\d{3,}\.html$"#, options: .regularExpression) != nil
+                || path.range(of: #"(chapter|read)[-_]?\d+"#, options: .regularExpression) != nil
+            // 严格：同目录 + 章节链接形态；详情地址无路径时才放宽（需带章节号）
+            let strict = sameFolder && looksChapter
+            let loose = prefix.isEmpty && looksChapter && chapterNumber(in: title) != nil
+            guard strict || loose else { continue }
+
+            items.append((title, url, chapterNumber(in: title)))
+        }
+
+        guard items.count >= 2 else { return [] }
+
+        // 同一 URL 可能同时被「开始阅读」按钮和真实章节名指向 → 保留「带章节号」的那个
+        var bestByURL: [String: (title: String, url: String, order: Int?)] = [:]
+        var urlOrder: [String] = []
+        for item in items {
+            guard let existing = bestByURL[item.url] else {
+                bestByURL[item.url] = item
+                urlOrder.append(item.url)
+                continue
+            }
+            if existing.order == nil && item.order != nil {
+                bestByURL[item.url] = item
+            } else if existing.order == item.order && item.title.count > existing.title.count {
+                bestByURL[item.url] = item
+            }
+        }
+        items = urlOrder.compactMap { bestByURL[$0] }
+
+        // 「最新章节」区块会先出现后 12 章，按章节号重排才不会乱序；
+        // 章节号覆盖率高时丢弃无编号项（导航按钮/广告位残留）。
+        let numbered = items.filter { $0.order != nil }.count
+        if numbered * 4 >= items.count * 3 {
+            items = items.filter { $0.order != nil }
+            items = items.enumerated()
+                .sorted { a, b in
+                    let x = a.element.order ?? Int.max
+                    let y = b.element.order ?? Int.max
+                    return x == y ? a.offset < b.offset : x < y
+                }
+                .map(\.element)
+        }
+        var deduped = Set<String>()
+        var result: [Chapter] = []
+        for item in items {
+            guard deduped.insert(item.title).inserted else { continue }
+            result.append(Chapter(index: result.count, title: item.title, url: item.url))
+        }
+        return result
+    }
+
+    /// 详情页所在目录（`http://x/book/160069/` → `/book/160069/`）。
+    private static func chapterPathPrefix(_ detailURL: String) -> String {
+        guard !detailURL.isEmpty, let url = URL(string: detailURL) else { return "" }
+        var path = url.path
+        if path.isEmpty { return "" }
+        if !path.hasSuffix("/") {
+            path = (path as NSString).deletingLastPathComponent
+            if !path.hasSuffix("/") { path += "/" }
+        }
+        return path
+    }
+
+    /// 标题里的章节序号（第12章 / 第12节 / 12.）。
+    static func chapterNumber(in title: String) -> Int? {
+        if let range = title.range(of: #"第\s*(\d+)\s*[章节回]"#, options: .regularExpression) {
+            let digits = String(title[range]).filter(\.isNumber)
+            return Int(digits)
+        }
+        if let range = title.range(of: #"^\s*(\d+)[\.、]"#, options: .regularExpression) {
+            return Int(String(title[range]).filter(\.isNumber))
+        }
+        return nil
     }
 
     // MARK: - 正文
