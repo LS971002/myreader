@@ -1,4 +1,5 @@
 import Foundation
+import CommonCrypto
 
 /// IBS 书源引擎：搜索 → 详情 → 目录 → 正文 四大流程。
 /// 复刻爱阅 JxdNetDataProcess 执行模型：
@@ -169,18 +170,32 @@ final class IBSEngine {
                                          pageIndex: pageIndex,
                                          parentFrames: [], sourceRef: sourceRef)
             guard let listRules = fieldRules(step.parser, "_list"), let listRule = listRules.first else {
+                AppLog.warn("DIR", "〔\(source.name)〕无_list规则")
                 break
             }
-            let dom = HTMLParser.parse(step.text)
-            let items = ExSelector.parse(listRule).select(from: dom)
-            if items.isEmpty { break }
-
             let runner = RuleRunner(ctx: makeContext(step: step))
-            for item in items {
+
+            // 双模式列表（与 search 一致）：@json: 路径 → JSON 数组项；否则 HTML DOM 选择器
+            var entries: [(input: String, node: HTMLNode?)] = []
+            if listRule.hasPrefix("@json:") {
+                let path = String(listRule.dropFirst(6))
+                entries = JSONRule.objectArray(path, in: step.text).compactMap { item in
+                    guard let data = try? JSONSerialization.data(withJSONObject: item),
+                          let text = String(data: data, encoding: .utf8) else { return nil }
+                    return (text, nil)
+                }
+            } else {
+                let dom = HTMLParser.parse(step.text)
+                entries = ExSelector.parse(listRule).select(from: dom).map { ($0.textContent, $0) }
+            }
+            AppLog.info("DIR", "〔\(source.name)〕第\(pageIndex + 1)页列表项 \(entries.count) 个（\(listRule.hasPrefix("@json:") ? "JSON" : "DOM")模式）")
+            if entries.isEmpty { break }
+
+            for entry in entries {
                 let title = runFieldOn(runner, parser: step.parser, name: "title",
-                                       input: item.textContent, node: item) ?? ""
+                                       input: entry.input, node: entry.node) ?? ""
                 let url = runFieldOn(runner, parser: step.parser, name: "url",
-                                     input: item.textContent, node: item) ?? ""
+                                     input: entry.input, node: entry.node) ?? ""
                 guard !title.isEmpty, !url.isEmpty else { continue }
                 if !seenTitles.insert(title).inserted { continue }
                 chapters.append(Chapter(
@@ -207,6 +222,7 @@ final class IBSEngine {
                 break
             }
         }
+        AppLog.info("DIR", "〔\(source.name)〕目录完成：\(chapters.count) 章")
         return chapters
     }
 
@@ -229,7 +245,17 @@ final class IBSEngine {
         if let contentRules = fieldRules(step.parser, "content") {
             let runner = RuleRunner(ctx: makeContext(step: step))
             let dom = HTMLParser.parse(step.text)
-            let text = runner.run(RuleValue.combo(contentRules), input: step.text, dom: dom)
+            var text = runner.run(RuleValue.combo(contentRules), input: step.text, dom: dom)
+            // 智能兜底：组合规则含 @def: 且结果疑似 Base64 密文（JS解密链未生效）→
+            // 七猫模式原生解密（前16B=IV，AES-128-CBC，key需从@def提取失败则跳过）
+            if let t = text, Self.looksLikeBase64Cipher(t),
+               contentRules.contains(where: { $0.contains("@def:") && $0.contains("CryptoJS") }) {
+                AppLog.warn("CONTENT", "〔\(source.name)〕JS解密疑似未生效（结果仍为Base64密文），尝试原生兜底")
+                if let plain = Self.decryptQimaoStyle(cipherB64: t, script: contentRules.first(where: { $0.contains("@def:") }) ?? "") {
+                    text = plain
+                    AppLog.info("CONTENT", "〔\(source.name)〕原生兜底解密成功：\(plain.count)字")
+                }
+            }
             if let text, !text.isEmpty {
                 let cleaned = Self.cleanContent(text)
                 AppLog.info("CONTENT", "〔\(source.name)〕content规则命中：\(cleaned.count)字")
@@ -562,6 +588,59 @@ final class IBSEngine {
     }
 
     // MARK: - 工具
+
+    /// 疑似 Base64 密文（长度>100、纯Base64字符集、无中文）。
+    static func looksLikeBase64Cipher(_ text: String) -> Bool {
+        guard text.count > 100 else { return false }
+        let b64Chars = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\r\n ")
+        return text.unicodeScalars.allSatisfy { b64Chars.contains($0) }
+    }
+
+    /// 七猫模式原生解密兜底：Base64解码 → 前16字节作IV → AES-128-CBC(PKCS7)。
+    /// key 从 @def 脚本正则提取（`Utf8.parse("<16字符>")`）；提取失败返回 nil。
+    static func decryptQimaoStyle(cipherB64: String, script: String) -> String? {
+        // 从 @def: CryptoJS 脚本中提取 key: CryptoJS.enc.Utf8.parse("242ccb8230d709e1")
+        guard let match = script.range(of: #"Utf8\.parse\("([0-9a-fA-F]{16})"\)"#,
+                                       options: .regularExpression) else {
+            AppLog.warn("CONTENT", "原生兜底：未从@def脚本提取到16位key")
+            return nil
+        }
+        let keyStr = String(script[match]).replacingOccurrences(
+            of: #"Utf8\.parse\(|\)|""#, with: "", options: .regularExpression)
+        guard keyStr.count == 16,
+              let cipherData = Data(base64Encoded: cipherB64.trimmingCharacters(in: .whitespacesAndNewlines)),
+              cipherData.count > 16 else {
+            AppLog.warn("CONTENT", "原生兜底：key长度或Base64数据不合法")
+            return nil
+        }
+        let iv = cipherData.prefix(16)
+        let ciphertext = cipherData.dropFirst(16)
+        guard ciphertext.count % 16 == 0 else { return nil }
+
+        var out = Data(count: ciphertext.count)
+        var moved = 0
+        let outCapacity = out.count
+        let keyData = Data(keyStr.utf8)
+        let status = keyData.withUnsafeBytes { keyPtr -> CCCryptorStatus in
+            iv.withUnsafeBytes { ivPtr -> CCCryptorStatus in
+                ciphertext.withUnsafeBytes { dataPtr -> CCCryptorStatus in
+                    out.withUnsafeMutableBytes { outPtr -> CCCryptorStatus in
+                        CCCrypt(
+                            CCOperation(kCCDecrypt), CCAlgorithm(kCCAlgorithmAES),
+                            CCOptions(kCCOptionPKCS7Padding),
+                            keyPtr.baseAddress, keyData.count,
+                            ivPtr.baseAddress,
+                            dataPtr.baseAddress, ciphertext.count,
+                            outPtr.baseAddress, outCapacity, &moved)
+                    }
+                }
+            }
+        }
+        guard status == kCCSuccess, moved > 0 else { return nil }
+        out.removeSubrange(moved..<out.count)
+        return String(data: out, encoding: .utf8)
+    }
 
     /// data:text/plain;base64,XXX → 解码文本（短路机制）。
     private func decodeDataURL(_ url: String) -> String {
