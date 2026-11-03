@@ -298,7 +298,10 @@ final class IBSEngine {
                   !raw.hasPrefix("#"), !raw.hasPrefix("javascript"), !raw.hasPrefix("mailto") else { continue }
             let url = HTTPClient.absolute(raw, base: baseURL.isEmpty ? detailURL : baseURL)
             guard !url.isEmpty else { continue }
-            if !host.isEmpty, let u = URL(string: url), !u.host.isEmpty, u.host != host { continue }
+            // URL.host 是 Optional（iOS 16 起还有 host(percentEncoded:) 重载），必须显式解包
+            if !host.isEmpty, let other = URL(string: url)?.host, !other.isEmpty, other != host {
+                continue
+            }
 
             var title = node.textContent
                 .replacingOccurrences(of: "\u{3000}", with: " ")
