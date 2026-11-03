@@ -237,7 +237,11 @@ final class RuleRunner {
                     out += String(rest.dropFirst())
                     return out.isEmpty ? nil : out
                 }
-                out += String(rest[rest.index(after: rest.startIndex)...close])
+                // 必须是半开区间 `..<close`：`...close` 会把闭合引号本身也拼进去
+                // （101Minc `@str:self+"index.html"` → 产出 `index.html"` →
+                //   目录 URL 末尾 `%22` → 404 → 目录 0 章，日志实锤）
+                let start = rest.index(after: rest.startIndex)
+                out += close > start ? String(rest[start..<close]) : ""
                 rest = String(rest[rest.index(after: close)...])
             } else {
                 let piece: String

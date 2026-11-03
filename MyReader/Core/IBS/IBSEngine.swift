@@ -30,12 +30,45 @@ final class IBSEngine {
 
     // MARK: - 步骤结果
 
+    /// 单层执行快照：爱阅里一个 JxdNetDataProcess 实例 = 一次请求 + 一套 parser。
+    struct StepLayer {
+        var text: String = ""
+        var headers: [String: String] = [:]
+        var finalURL: String = ""
+        var parser: [String: ParserField] = [:]
+        /// 本层视角的父链（含本层自身），按层求值时充当 self.parent。
+        var frames: [ParentFrame] = []
+    }
+
     struct StepResult {
         var text: String = ""
         var headers: [String: String] = [:]
         var finalURL: String = ""
-        var parser: [String: ParserField] = [:]   // 最深层 parser（字段提取）
+        var parser: [String: ParserField] = [:]   // 最深层 parser（单值字段默认取这里）
+        /// 全层快照：index 0 = 最深层，末尾 = 最外层。
+        /// 逆向依据（JxdNetDataProcess，0x10003a624 `parseContent` 反汇编）：
+        ///   本层 `parseCurrentContent` 先执行 → 若 `mCurMiddleProcess` 存在
+        ///   → `[子进程 parseContent]` → `+MergeJson:toResult:` 把子层结果合并进本层。
+        /// `MergeJson` → `+AddObject:withKey:toResult:`（0x100035254）合并规则：
+        ///   `+IsEmptyValue:`（0x10003499c：nil/NSNull/空串/空数组/元素全空的容器）为真 → 跳过；
+        ///   键不存在 → 写入；两字典 → 递归；两数组 → 追加；标量冲突 → 转为数组 [旧, 新]。
+        /// 即多层 parser 是「逐层解析 + 合并，空值不覆盖父层」，而不是二选一回退。
+        var layers: [StepLayer] = []
         var frames: [ParentFrame] = []            // 最深层视角的父链
+    }
+
+    /// 列表项：记录它来自哪一层，字段求值必须用该层的响应 DOM / 文本。
+    private struct ListEntry {
+        let input: String
+        let node: HTMLNode?
+        let layerIndex: Int
+    }
+
+    /// 单层解析视图：本层响应 + 本层 parser + 已解析 DOM + 规则执行器。
+    private struct LayerView {
+        let layer: StepLayer
+        let runner: RuleRunner
+        let dom: HTMLNode?
     }
 
     // MARK: - 搜索
@@ -56,45 +89,48 @@ final class IBSEngine {
         let step = try await runNode(node, overrideURL: nil, keyword: trimmed, pageIndex: 0,
                                      parentFrames: [], sourceRef: sourceRef)
 
-        // 最深层 parser：_list + bookName / author / desc + _BookFields.dirURL
-        guard let listRules = fieldRules(step.parser, "_list"), let listRule = listRules.first else {
-            return []
-        }
-        let runner = RuleRunner(ctx: makeContext(step: step))
+        // 逐层解析 + 合并（爱阅 parseContent → MergeJson）：外层到深层依次解析，
+        // 空列表按 IsEmptyValue 语义跳过、不覆盖已有结果，非空则追加。
+        var views: [LayerView] = []
+        var entries: [ListEntry] = []
+        var firstListRule = ""
 
-        // 双模式列表：@json: 路径 → JSON 数组项；否则 HTML DOM 选择器
-        // 字段规则求值输入：JSON 模式 = (项JSON文本, nil)；DOM 模式 = (节点文本, 节点对象)
-        var entries: [(input: String, node: HTMLNode?)] = []
-        if listRule.hasPrefix("@json:") {
-            let path = String(listRule.dropFirst(6))
-            entries = JSONRule.objectArray(path, in: step.text).compactMap { item in
-                guard let data = try? JSONSerialization.data(withJSONObject: item),
-                      let text = String(data: data, encoding: .utf8) else { return nil }
-                return (text, nil)
+        for layer in step.layers.reversed() {
+            let dom = layer.text.isEmpty ? nil : HTMLParser.parse(layer.text)
+            let runner = RuleRunner(ctx: makeContext(layer: layer))
+            let layerIndex = views.count
+            views.append(LayerView(layer: layer, runner: runner, dom: dom))
+
+            guard let rule = fieldRules(layer.parser, "_list")?.first else { continue }
+            if firstListRule.isEmpty { firstListRule = rule }
+            let candidate = parseListEntries(rule, text: layer.text, dom: dom, source: source.name)
+            guard !candidate.isEmpty else {
+                AppLog.debug("SEARCH", "〔\(source.name)〕第\(layerIndex + 1)层_list为空，跳过合并（\(rule.prefix(46))）")
+                continue
             }
-        } else {
-            // 阶段日志：解析页导致闪退时能精确定位是哪一步（此前这段静默，崩溃无痕迹）
-            AppLog.debug("SEARCH", "〔\(source.name)〕解析DOM \(step.text.count)字")
-            let dom = HTMLParser.parse(step.text)
-            AppLog.debug("SEARCH", "〔\(source.name)〕DOM就绪，执行 _list 选择器")
-            let selected = ExSelector.parse(listRule).select(from: dom)
-            AppLog.debug("SEARCH", "〔\(source.name)〕选择器命中 \(selected.count) 节点")
-            entries = selected.map { ($0.textContent, $0) }
+            AppLog.debug("SEARCH", "〔\(source.name)〕第\(layerIndex + 1)层_list命中\(candidate.count)项（\(rule.prefix(46))）")
+            entries.append(contentsOf: candidate.map {
+                ListEntry(input: $0.input, node: $0.node, layerIndex: layerIndex)
+            })
         }
         guard !entries.isEmpty else {
-            AppLog.warn("SEARCH", "〔\(source.name)〕列表为空（_list: \(listRule.prefix(60))）"
-                        + " 响应\(step.text.count)字 末尾: \(step.text.suffix(120).replacingOccurrences(of: "\n", with: " "))")
+            AppLog.warn("SEARCH", "〔\(source.name)〕列表为空（_list: \(firstListRule.prefix(60))）"
+                        + " 层数\(views.count) 响应\(step.text.count)字 末尾: \(step.text.suffix(120).replacingOccurrences(of: "\n", with: " "))")
             return []
         }
-        AppLog.info("SEARCH", "〔\(source.name)〕列表项 \(entries.count) 个（\(listRule.hasPrefix("@json:") ? "JSON" : "DOM")模式）")
+        AppLog.info("SEARCH", "〔\(source.name)〕列表项 \(entries.count) 个（\(firstListRule.hasPrefix("@json:") ? "JSON" : "DOM")模式）")
 
         var results: [SearchResult] = []
         var seen = Set<String>()
 
         for (entryIndex, entry) in entries.prefix(80).enumerated() {
+            let view = views[entry.layerIndex]
+            let parser = view.layer.parser
+            let baseURL = view.layer.finalURL.isEmpty ? source.homeURL : view.layer.finalURL
+
             // 逐项同步打点：崩溃发生在字段求值阶段时，日志最后一行就是出错项/字段
             AppLog.traceSync("SEARCH", "〔\(source.name)〕项\(entryIndex)/\(entries.count) 求书名")
-            var title = runFieldOn(runner, parser: step.parser, name: "bookName",
+            var title = runFieldOn(view.runner, parser: parser, name: "bookName",
                                    input: entry.input, node: entry.node) ?? ""
             // 书名清洗：真实书源偶尔把整段简介塞进 title（几十万字），
             // 会拖垮 UI 排版与聚合逻辑
@@ -102,30 +138,29 @@ final class IBSEngine {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if title.count > 100 { title = String(title.prefix(100)) }
             guard !title.isEmpty else { continue }
-            let key = title + "|" + (fieldRules(step.parser, "dirURL")?.first ?? "")
+            let key = title + "|" + (fieldRules(parser, "dirURL")?.first ?? "")
             if !seen.insert(key).inserted { continue }
 
             AppLog.traceSync("SEARCH", "〔\(source.name)〕项\(entryIndex) 书名=\(title.prefix(20)) 求dirURL")
-            let dirURL = runFieldOn(runner, parser: step.parser, name: "dirURL",
+            let dirURL = runFieldOn(view.runner, parser: parser, name: "dirURL",
                                     input: entry.input, node: entry.node) ?? ""
             if dirURL.isEmpty {
-                AppLog.warn("SEARCH", "〔\(source.name)〕《\(title.prefix(16))》dirURL为空(规则: \(fieldRules(step.parser, "dirURL")?.first?.prefix(50) ?? "-"))，link兜底为搜索URL")
+                AppLog.warn("SEARCH", "〔\(source.name)〕《\(title.prefix(16))》dirURL为空(规则: \(fieldRules(parser, "dirURL")?.first?.prefix(50) ?? "-"))，link兜底为搜索URL")
             }
-            // 101Minc 这类源的 href 形如 `javascript:sovote(123,'/book/x/')`，
+            // 部分源的 href 形如 `javascript:sovote(123,'/book/x/')`，
             // 规则若没把前缀剥干净，拼出来的「URL」交给 URLComponents 赋值会抛异常。
-            // 非 http(s) 结果一律回退到搜索页地址，保证 link 始终可请求。
-            var resolvedLink = dirURL.isEmpty ? step.finalURL
-                : HTTPClient.absolute(dirURL, base: step.finalURL.isEmpty ? source.homeURL : step.finalURL)
+            // 非 http(s) 结果一律回退到本层响应地址，保证 link 始终可请求。
+            var resolvedLink = dirURL.isEmpty ? baseURL : HTTPClient.absolute(dirURL, base: baseURL)
             if !(resolvedLink.hasPrefix("http://") || resolvedLink.hasPrefix("https://")) {
-                AppLog.warn("SEARCH", "〔\(source.name)〕《\(title.prefix(16))》链接非法，回退搜索页：\(resolvedLink.prefix(60))")
-                resolvedLink = step.finalURL
+                AppLog.warn("SEARCH", "〔\(source.name)〕《\(title.prefix(16))》链接非法，回退本层地址：\(resolvedLink.prefix(60))")
+                resolvedLink = baseURL
             }
             let link = resolvedLink
             AppLog.traceSync("SEARCH", "〔\(source.name)〕项\(entryIndex) dirURL=\(dirURL.prefix(48)) link=\(link.prefix(60)) 求作者")
-            let author = runFieldOn(runner, parser: step.parser, name: "author",
+            let author = runFieldOn(view.runner, parser: parser, name: "author",
                                     input: entry.input, node: entry.node) ?? ""
             // helpId 提取（七猫形态：_BookFields.helpId → 正文组合规则 source.helpId）
-            let helpId = runFieldOn(runner, parser: step.parser, name: "helpId",
+            let helpId = runFieldOn(view.runner, parser: parser, name: "helpId",
                                     input: entry.input, node: entry.node) ?? ""
             if helpId.isEmpty == false && self.helpId.isEmpty {
                 self.helpId = helpId
@@ -135,9 +170,9 @@ final class IBSEngine {
             // 简介/最新章节做长度上限：个别源会取到整页文本，UI 渲染与 Hashable
             // 计算会被拖到秒级（曾表现为「搜索时闪退」）
             AppLog.traceSync("SEARCH", "〔\(source.name)〕项\(entryIndex) 求简介/封面/最新章节")
-            var intro = runFieldOn(runner, parser: step.parser, name: "desc", input: entry.input, node: entry.node) ?? ""
+            var intro = runFieldOn(view.runner, parser: parser, name: "desc", input: entry.input, node: entry.node) ?? ""
             if intro.count > 800 { intro = String(intro.prefix(800)) }
-            var latest = runFieldOn(runner, parser: step.parser, name: "lastChapterTitle", input: entry.input, node: entry.node) ?? ""
+            var latest = runFieldOn(view.runner, parser: parser, name: "lastChapterTitle", input: entry.input, node: entry.node) ?? ""
             latest = latest.trimmingCharacters(in: .whitespacesAndNewlines)
             if latest.count > 120 { latest = String(latest.prefix(120)) }
             var authorText = author.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -151,8 +186,8 @@ final class IBSEngine {
                 helpId: helpId,
                 link: link,
                 cover: HTTPClient.absolute(
-                    runFieldOn(runner, parser: step.parser, name: "coverUrl", input: entry.input, node: entry.node) ?? "",
-                    base: source.homeURL),
+                    runFieldOn(view.runner, parser: parser, name: "coverUrl", input: entry.input, node: entry.node) ?? "",
+                    base: baseURL),
                 intro: intro,
                 latest: latest,
                 matchKind: Self.classify(title: title, author: authorText, keyword: trimmed)
@@ -181,15 +216,22 @@ final class IBSEngine {
         sourceRef.detailURL = link
         let step = try await runNode(node, overrideURL: link, keyword: nil, pageIndex: nil,
                                      parentFrames: [], sourceRef: sourceRef)
-        let runner = RuleRunner(ctx: makeContext(step: step))
-        let dom = HTMLParser.parse(step.text)
-        let intro = runFieldOn(runner, parser: step.parser, name: "desc",
-                               input: dom.textContent, node: dom) ?? ""
-        let cover = HTTPClient.absolute(
-            runFieldOn(runner, parser: step.parser, name: "coverUrl",
-                       input: dom.textContent, node: dom) ?? "",
-            base: source.homeURL)
-        return (intro, cover)
+        // 逐层取（外层 → 深层）：空值不覆盖，取第一个非空 desc / coverUrl
+        var intro = ""
+        var cover = ""
+        for layer in step.layers.reversed() {
+            let runner = RuleRunner(ctx: makeContext(layer: layer))
+            let dom = HTMLParser.parse(layer.text)
+            if intro.isEmpty {
+                intro = runFieldOn(runner, parser: layer.parser, name: "desc",
+                                   input: dom.textContent, node: dom) ?? ""
+            }
+            if cover.isEmpty {
+                cover = runFieldOn(runner, parser: layer.parser, name: "coverUrl",
+                                   input: dom.textContent, node: dom) ?? ""
+            }
+        }
+        return (intro, HTTPClient.absolute(cover, base: source.homeURL))
     }
 
     // MARK: - 目录
@@ -218,37 +260,46 @@ final class IBSEngine {
             let step = try await runNode(node, overrideURL: overrideURL, keyword: nil,
                                          pageIndex: pageIndex,
                                          parentFrames: [], sourceRef: sourceRef)
-            guard let listRules = fieldRules(step.parser, "_list"), let listRule = listRules.first else {
-                AppLog.warn("DIR", "〔\(source.name)〕无_list规则（parser键: \(step.parser.keys.sorted().prefix(6).joined(separator: ","))）")
+            // 逐层解析 + 合并（与 search 一致）：空列表按 IsEmptyValue 跳过，非空追加
+            var views: [LayerView] = []
+            var entries: [ListEntry] = []
+            var firstListRule = ""
+            for layer in step.layers.reversed() {
+                let dom = layer.text.isEmpty ? nil : HTMLParser.parse(layer.text)
+                let runner = RuleRunner(ctx: makeContext(layer: layer, sourceRef: sourceRef))
+                let layerIndex = views.count
+                views.append(LayerView(layer: layer, runner: runner, dom: dom))
+                guard let rule = fieldRules(layer.parser, "_list")?.first else { continue }
+                if firstListRule.isEmpty { firstListRule = rule }
+                let candidate = parseListEntries(rule, text: layer.text, dom: dom, source: source.name)
+                guard !candidate.isEmpty else {
+                    AppLog.debug("DIR", "〔\(source.name)〕第\(layerIndex + 1)层_list为空，跳过合并")
+                    continue
+                }
+                entries.append(contentsOf: candidate.map {
+                    ListEntry(input: $0.input, node: $0.node, layerIndex: layerIndex)
+                })
+            }
+            guard !firstListRule.isEmpty else {
+                AppLog.warn("DIR", "〔\(source.name)〕无_list规则（最深层parser键: \(step.parser.keys.sorted().prefix(6).joined(separator: ","))）")
                 break
             }
-            let runner = RuleRunner(ctx: makeContext(step: step, sourceRef: sourceRef))
-
-            // 双模式列表（与 search 一致）：@json: 路径 → JSON 数组项；否则 HTML DOM 选择器
-            var entries: [(input: String, node: HTMLNode?)] = []
-            if listRule.hasPrefix("@json:") {
-                let path = String(listRule.dropFirst(6))
-                entries = JSONRule.objectArray(path, in: step.text).compactMap { item in
-                    guard let data = try? JSONSerialization.data(withJSONObject: item),
-                          let text = String(data: data, encoding: .utf8) else { return nil }
-                    return (text, nil)
-                }
-            } else {
-                let dom = HTMLParser.parse(step.text)
-                entries = ExSelector.parse(listRule).select(from: dom).map { ($0.textContent, $0) }
-            }
-            AppLog.info("DIR", "〔\(source.name)〕第\(pageIndex + 1)页列表项 \(entries.count) 个（\(listRule.hasPrefix("@json:") ? "JSON" : "DOM")模式）"
-                        + (entries.isEmpty ? " _list: \(listRule.prefix(90))" : ""))
+            AppLog.info("DIR", "〔\(source.name)〕第\(pageIndex + 1)页列表项 \(entries.count) 个（\(firstListRule.hasPrefix("@json:") ? "JSON" : "DOM")模式）"
+                        + (entries.isEmpty ? " _list: \(firstListRule.prefix(90))" : ""))
             firstPageText = firstPageText.isEmpty ? step.text : firstPageText
+            let outermostURL = step.layers.last?.finalURL ?? step.finalURL
             firstPageBase = firstPageBase.isEmpty
-                ? (step.finalURL.isEmpty ? source.homeURL : step.finalURL) : firstPageBase
+                ? (outermostURL.isEmpty ? source.homeURL : outermostURL) : firstPageBase
             if entries.isEmpty { break }
 
             var emptyFieldSample = ""
             for entry in entries {
-                let title = runFieldOn(runner, parser: step.parser, name: "title",
+                let view = views[entry.layerIndex]
+                let parser = view.layer.parser
+                let base = view.layer.finalURL.isEmpty ? source.homeURL : view.layer.finalURL
+                let title = runFieldOn(view.runner, parser: parser, name: "title",
                                        input: entry.input, node: entry.node) ?? ""
-                let url = runFieldOn(runner, parser: step.parser, name: "url",
+                let url = runFieldOn(view.runner, parser: parser, name: "url",
                                      input: entry.input, node: entry.node) ?? ""
                 if emptyFieldSample.isEmpty && (title.isEmpty || url.isEmpty) {
                     let node = entry.node
@@ -260,7 +311,7 @@ final class IBSEngine {
                 chapters.append(Chapter(
                     index: chapters.count,
                     title: title,
-                    url: HTTPClient.absolute(url, base: step.finalURL.isEmpty ? source.homeURL : step.finalURL)))
+                    url: HTTPClient.absolute(url, base: base)))
             }
             if !emptyFieldSample.isEmpty {
                 AppLog.warn("DIR", "〔\(source.name)〕列表项字段缺失 \(emptyFieldSample)")
@@ -448,18 +499,22 @@ final class IBSEngine {
                                      parentFrames: [], sourceRef: sourceRef)
         AppLog.debug("CONTENT", "〔\(source.name)〕章节页响应 \(step.text.count) 字符：\(step.text.prefix(120))")
 
-        // 最深层 parser 的 content 字段（组合规则：@def: JS + @dyn: 提取 + @ex: 取文本）
-        if let contentRules = fieldRules(step.parser, "content") {
-            let runner = RuleRunner(ctx: makeContext(step: step, sourceRef: sourceRef))
-            let dom = HTMLParser.parse(step.text)
-            var text = runner.run(RuleValue.combo(contentRules), input: step.text, dom: dom)
+        // content 逐层尝试（外层 → 深层）：爱阅合并语义下 content 是标量，
+        // 父层非空优先，父层为空（IsEmptyValue）才由子层补上。
+        var hasContentRule = false
+        for layer in step.layers.reversed() {
+            guard let contentRules = fieldRules(layer.parser, "content") else { continue }
+            hasContentRule = true
+            let runner = RuleRunner(ctx: makeContext(layer: layer, sourceRef: sourceRef))
+            let dom = HTMLParser.parse(layer.text)
+            var text = runner.run(RuleValue.combo(contentRules), input: layer.text, dom: dom)
             // 智能兜底：@def: 携带 CryptoJS 的源（七猫形态）在 JS 解密链未生效时
             // （结果为 nil / 空 / 仍是 Base64 密文）→ 走原生 AES-128-CBC 解密。
             // 密文直接取响应里的 data.content，不依赖 JS 执行是否成功。
             if let defScript = contentRules.first(where: { $0.contains("@def:") && $0.contains("CryptoJS") }) {
                 let produced = text ?? ""
                 if produced.isEmpty || Self.looksLikeBase64Cipher(produced) {
-                    let cipher = JSONRule.path("data.content", in: step.text).first ?? produced
+                    let cipher = JSONRule.path("data.content", in: layer.text).first ?? produced
                     if Self.looksLikeBase64Cipher(cipher) {
                         AppLog.warn("CONTENT", "〔\(source.name)〕JS解密链未生效（结果: \(produced.isEmpty ? "空" : "\(produced.count)字密文")），尝试原生AES兜底")
                         if let plain = Self.decryptQimaoStyle(cipherB64: cipher, script: defScript) {
@@ -477,14 +532,16 @@ final class IBSEngine {
                 return cleaned
             }
             AppLog.warn("CONTENT", "〔\(source.name)〕content规则空结果（规则: \(contentRules.first?.prefix(60) ?? "")）")
-        } else {
-            AppLog.warn("CONTENT", "〔\(source.name)〕最深层parser无content字段（键: \(step.parser.keys.sorted().prefix(8).joined(separator: ","))）")
         }
-        // 兜底：_range
-        if let rangeRules = fieldRules(step.parser, "_range") {
-            let runner = RuleRunner(ctx: makeContext(step: step, sourceRef: sourceRef))
-            let dom = HTMLParser.parse(step.text)
-            let text = runner.run(RuleValue.combo(rangeRules), input: step.text, dom: dom)
+        if !hasContentRule {
+            AppLog.warn("CONTENT", "〔\(source.name)〕所有层均无content字段（最深层键: \(step.parser.keys.sorted().prefix(8).joined(separator: ","))）")
+        }
+        // 兜底：_range（同样逐层）
+        for layer in step.layers.reversed() {
+            guard let rangeRules = fieldRules(layer.parser, "_range") else { continue }
+            let runner = RuleRunner(ctx: makeContext(layer: layer, sourceRef: sourceRef))
+            let dom = HTMLParser.parse(layer.text)
+            let text = runner.run(RuleValue.combo(rangeRules), input: layer.text, dom: dom)
             if let text, !text.isEmpty {
                 let cleaned = Self.cleanContent(text)
                 AppLog.info("CONTENT", "〔\(source.name)〕_range兜底命中：\(cleaned.count)字")
@@ -544,6 +601,14 @@ final class IBSEngine {
         var text = ""
         var headers: [String: String] = [:]
         var finalURL = urlStr ?? ""
+
+        // middleHandle 不写 url = 不重新请求，直接在父层响应上再套一套 parser。
+        // 爱阅 JxdNetDataProcess 里子 process 的 url 为空即沿用当前响应内容。
+        if (urlStr ?? "").isEmpty, let parent = parentFrames.first {
+            text = parent.respContent
+            headers = parent.headers
+            finalURL = parent.currentRequestUrl
+        }
 
         if let url = urlStr, !url.isEmpty {
             if url.hasPrefix("data:") {
@@ -616,13 +681,19 @@ final class IBSEngine {
 
         // 5. middleHandle 递归（子层脚本 self.parent.* 由 parentChain 承载）
         if let middle = node.middleHandle {
-            return try await runNode(middle, overrideURL: nil, keyword: keyword, pageIndex: pageIndex,
-                                     parentFrames: frames, sourceRef: sourceRef)
+            var result = try await runNode(middle, overrideURL: nil, keyword: keyword, pageIndex: pageIndex,
+                                           parentFrames: frames, sourceRef: sourceRef)
+            // 本层追加到链尾（由深到浅），上层解析时按 MergeJson 语义逐层合并
+            result.layers.append(StepLayer(text: text, headers: headers,
+                                           finalURL: finalURL, parser: node.parser, frames: frames))
+            return result
         }
 
         // 6. 本层即最深层
+        let layer = StepLayer(text: text, headers: headers, finalURL: finalURL,
+                              parser: node.parser, frames: frames)
         return StepResult(text: text, headers: headers, finalURL: finalURL,
-                          parser: node.parser, frames: frames)
+                          parser: node.parser, layers: [layer], frames: frames)
     }
 
     // MARK: - 字段执行辅助
@@ -637,6 +708,23 @@ final class IBSEngine {
             }
         }
         return nil
+    }
+
+    /// 解析一层 `_list`（@json: 路径 → 数组项 JSON 文本；否则 DOM 选择器 → 节点）。
+    private func parseListEntries(_ rule: String, text: String, dom: HTMLNode?,
+                                  source name: String) -> [(input: String, node: HTMLNode?)] {
+        if rule.hasPrefix("@json:") {
+            let path = String(rule.dropFirst(6))
+            return JSONRule.objectArray(path, in: text).compactMap { item -> (input: String, node: HTMLNode?)? in
+                guard let data = try? JSONSerialization.data(withJSONObject: item),
+                      let json = String(data: data, encoding: .utf8) else { return nil }
+                return (input: json, node: nil)
+            }
+        }
+        guard let dom else { return [] }
+        return ExSelector.parse(rule).select(from: dom).map {
+            (input: $0.textContent, node: Optional($0))
+        }
     }
 
     /// 在列表项上执行字段组合规则。
@@ -658,6 +746,20 @@ final class IBSEngine {
         ctx.respContent = step.text
         ctx.responseHeaders = step.headers
         ctx.parentChain = step.frames
+        var ref = sourceRef ?? DynSourceRef(configName: source.name)
+        if ref.configName.isEmpty { ref.configName = source.name }
+        if ref.helpId.isEmpty { ref.helpId = helpId }
+        ctx.source = ref
+        return ctx
+    }
+
+    /// 按层构造上下文：响应文本 / 响应头 / 父链都取自该层，
+    /// 避免「用外层规则解内层 HTML」时 self.contents、self.parent 串层。
+    private func makeContext(layer: StepLayer, sourceRef: DynSourceRef? = nil) -> DynContext {
+        let ctx = DynContext(store: store)
+        ctx.respContent = layer.text
+        ctx.responseHeaders = layer.headers
+        ctx.parentChain = layer.frames
         var ref = sourceRef ?? DynSourceRef(configName: source.name)
         if ref.configName.isEmpty { ref.configName = source.name }
         if ref.helpId.isEmpty { ref.helpId = helpId }
