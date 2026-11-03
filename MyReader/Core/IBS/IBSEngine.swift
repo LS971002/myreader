@@ -96,14 +96,15 @@ final class IBSEngine {
         var firstListRule = ""
 
         for layer in step.layers.reversed() {
-            let dom = layer.text.isEmpty ? nil : HTMLParser.parse(layer.text)
+            let scoped = scopedLayerContent(layer)
+            let dom = scoped.dom
             let runner = RuleRunner(ctx: makeContext(layer: layer))
             let layerIndex = views.count
             views.append(LayerView(layer: layer, runner: runner, dom: dom))
 
             guard let rule = fieldRules(layer.parser, "_list")?.first else { continue }
             if firstListRule.isEmpty { firstListRule = rule }
-            let candidate = parseListEntries(rule, text: layer.text, dom: dom, source: source.name)
+            let candidate = parseListEntries(rule, text: scoped.text, dom: dom, source: source.name)
             guard !candidate.isEmpty else {
                 AppLog.debug("SEARCH", "〔\(source.name)〕第\(layerIndex + 1)层_list为空，跳过合并（\(rule.prefix(46))）")
                 continue
@@ -222,7 +223,8 @@ final class IBSEngine {
         var cover = ""
         for layer in step.layers.reversed() {
             let runner = RuleRunner(ctx: makeContext(layer: layer))
-            let dom = HTMLParser.parse(layer.text)
+            let scoped = scopedLayerContent(layer)
+            guard let dom = scoped.dom else { continue }
             if intro.isEmpty {
                 intro = runFieldOn(runner, parser: layer.parser, name: "desc",
                                    input: dom.textContent, node: dom) ?? ""
@@ -271,13 +273,14 @@ final class IBSEngine {
             var entries: [ListEntry] = []
             var firstListRule = ""
             for layer in step.layers.reversed() {
-                let dom = layer.text.isEmpty ? nil : HTMLParser.parse(layer.text)
+                let scoped = scopedLayerContent(layer, sourceRef: sourceRef)
+                let dom = scoped.dom
                 let runner = RuleRunner(ctx: makeContext(layer: layer, sourceRef: sourceRef))
                 let layerIndex = views.count
                 views.append(LayerView(layer: layer, runner: runner, dom: dom))
                 guard let rule = fieldRules(layer.parser, "_list")?.first else { continue }
                 if firstListRule.isEmpty { firstListRule = rule }
-                let candidate = parseListEntries(rule, text: layer.text, dom: dom, source: source.name)
+                let candidate = parseListEntries(rule, text: scoped.text, dom: dom, source: source.name)
                 guard !candidate.isEmpty else {
                     AppLog.debug("DIR", "〔\(source.name)〕第\(layerIndex + 1)层_list为空，跳过合并")
                     continue
@@ -524,8 +527,10 @@ final class IBSEngine {
             guard let contentRules = fieldRules(layer.parser, "content") else { continue }
             hasContentRule = true
             let runner = RuleRunner(ctx: makeContext(layer: layer, sourceRef: sourceRef))
-            let dom = HTMLParser.parse(layer.text)
-            var text = runner.run(RuleValue.combo(contentRules), input: layer.text, dom: dom)
+            // DOM 用 `_range` 裁剪后的范围（选择器类 content 规则常依赖它）；
+            // 文本仍用整层响应（@json:/@def: 类规则需要完整 JSON）。
+            let scoped = scopedLayerContent(layer, sourceRef: sourceRef)
+            var text = runner.run(RuleValue.combo(contentRules), input: layer.text, dom: scoped.dom)
             // 智能兜底：@def: 携带 CryptoJS 的源（七猫形态）在 JS 解密链未生效时
             // （结果为 nil / 空 / 仍是 Base64 密文）→ 走原生 AES-128-CBC 解密。
             // 密文直接取响应里的 data.content，不依赖 JS 执行是否成功。
@@ -726,6 +731,26 @@ final class IBSEngine {
             }
         }
         return nil
+    }
+
+    /// 应用 `_range` 解析作用域。
+    /// 爱阅 parser 里 `_range` 是「先裁出片段，再在片段内跑 `_list`/字段选择器」：
+    /// 真实源常见 `_range` 取 `div#allchapter` 的 HTML，`_list` 只写 `@ex:dd`，
+    /// 若在整个页面上跑 `dd` 会命中书签区/推荐区等无关节点。
+    /// 规则求值失败或产物为空时退回整页，不影响只用 `_range` 当正文兜底的源。
+    private func scopedLayerContent(_ layer: StepLayer,
+                                    sourceRef: DynSourceRef? = nil) -> (text: String, dom: HTMLNode?) {
+        let baseDom = layer.text.isEmpty ? nil : HTMLParser.parse(layer.text)
+        guard let baseDom, let rules = fieldRules(layer.parser, "_range") else {
+            return (layer.text, baseDom)
+        }
+        let runner = RuleRunner(ctx: makeContext(layer: layer, sourceRef: sourceRef))
+        guard let scoped = runner.run(RuleValue.combo(rules), input: layer.text, dom: baseDom),
+              !scoped.isEmpty, scoped != layer.text else {
+            return (layer.text, baseDom)
+        }
+        AppLog.debug("ENGINE", "〔\(source.name)〕_range范围生效：\(scoped.count)字")
+        return (scoped, HTMLParser.parse(scoped))
     }
 
     /// 解析一层 `_list`（@json: 路径 → 数组项 JSON 文本；否则 DOM 选择器 → 节点）。
