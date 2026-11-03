@@ -8,6 +8,9 @@ import CommonCrypto
 final class IBSEngine {
     let source: IBSBookSource
     private let store = RuleStore()
+    /// 书籍级辅助id（七猫形态：搜索 _BookFields.helpId 提取 →
+    /// 目录/正文组合规则 `bid=source.helpId` 使用；跨引擎实例由 Book.helpId 传递）。
+    var helpId = ""
 
     enum EngineError: LocalizedError {
         case noSearchNode
@@ -98,12 +101,20 @@ final class IBSEngine {
                 : HTTPClient.absolute(dirURL, base: step.finalURL.isEmpty ? source.homeURL : step.finalURL)
             let author = runFieldOn(runner, parser: step.parser, name: "author",
                                     input: entry.input, node: entry.node) ?? ""
+            // helpId 提取（七猫形态：_BookFields.helpId → 正文组合规则 source.helpId）
+            let helpId = runFieldOn(runner, parser: step.parser, name: "helpId",
+                                    input: entry.input, node: entry.node) ?? ""
+            if helpId.isEmpty == false && self.helpId.isEmpty {
+                self.helpId = helpId
+                AppLog.debug("SEARCH", "〔\(source.name)〕helpId提取：\(helpId.prefix(20))")
+            }
 
             results.append(SearchResult(
                 sourceID: source.id,
                 sourceName: source.name,
                 title: title,
                 author: author,
+                helpId: helpId,
                 link: link,
                 cover: HTTPClient.absolute(
                     runFieldOn(runner, parser: step.parser, name: "coverUrl", input: entry.input, node: entry.node) ?? "",
@@ -157,6 +168,7 @@ final class IBSEngine {
         var sourceRef = DynSourceRef(configName: source.name)
         sourceRef.dirURL = link
         sourceRef.detailURL = link
+        sourceRef.helpId = helpId
 
         var chapters: [Chapter] = []
         // 爱阅语义：sourceDetail.url 为空 = 直接请求目录链接（link）。
@@ -214,8 +226,10 @@ final class IBSEngine {
                     next = nextRule
                 }
                 if let next, !next.isEmpty {
+                    AppLog.debug("DIR", "〔\(source.name)〕翻页: \(next.prefix(60))")
                     overrideURL = HTTPClient.absolute(next, base: step.finalURL)
                 } else {
+                    AppLog.debug("DIR", "〔\(source.name)〕翻页终止（nextPageUrl求值空）")
                     break
                 }
             } else {
@@ -235,6 +249,7 @@ final class IBSEngine {
         }
         var sourceRef = DynSourceRef(configName: source.name)
         sourceRef.chapterURL = chapter.url
+        sourceRef.helpId = helpId
 
         // 爱阅语义：chapterDetail.url 为空 = 直接请求章节URL（chapter.url）
         let step = try await runNode(node, overrideURL: chapter.url, keyword: nil, pageIndex: nil,

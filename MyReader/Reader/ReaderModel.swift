@@ -94,6 +94,7 @@ final class ReaderModel: ObservableObject {
             pageCache[chapterIndex] = newPages
         }
         pages = newPages ?? [text]
+        AppLog.info("READER", "章节[\(chapterIndex)]分页完成：\(pages.count)页 / \(text.count)字\(useLastPage ? "（定位末页）" : "")")
 
         if useLastPage {
             pageIndex = max(0, pages.count - 1)
@@ -127,6 +128,7 @@ final class ReaderModel: ObservableObject {
         }
         let chapter = book.chapters[index]
         let engine = IBSEngine(source: source)
+        engine.helpId = book.helpId
         do {
             AppLog.debug("READER", "取章节[\(index)] \(chapter.title.prefix(20))（源:\(source.name)）")
             let text = try await engine.content(chapter: chapter)

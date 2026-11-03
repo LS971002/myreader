@@ -43,6 +43,7 @@ struct ShelfView: View {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 18)], spacing: 22) {
                             ForEach(books) { book in
                                 Button {
+                                    AppLog.info("UI", "打开书：\(book.name)（\(book.chapters.count)章，源:\(book.sourceName ?? "本地")，进度第\(book.currentChapter + 1)章）")
                                     readingBook = book
                                 } label: {
                                     BookCell(book: book)

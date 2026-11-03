@@ -286,6 +286,7 @@ struct SearchResult: Identifiable, Hashable {
     var sourceName: String
     var title: String
     var author: String
+    var helpId: String = ""
     var link: String
     var cover: String
     var intro: String
@@ -351,6 +352,8 @@ struct Book: Codable, Identifiable, Hashable {
     var sourceID: UUID? = nil
     var sourceName: String = ""
     var detailURL: String = ""
+    /// 书籍级辅助id（七猫形态：source.helpId，正文/目录组合规则使用）。
+    var helpId: String = ""
     /// 换源用：同书在其它源的详情地址。
     var altLinks: [String] = []
 

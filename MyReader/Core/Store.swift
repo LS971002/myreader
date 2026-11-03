@@ -67,11 +67,16 @@ final class Store: ObservableObject {
             json(books), json(sourceRecords), json(groups), json(bookmarks), json(settings)
         )
         io.async {
-            try? snapshot.0?.write(to: Paths.booksJSON, options: .atomic)
-            try? snapshot.1?.write(to: Paths.sourcesJSON, options: .atomic)
-            try? snapshot.2?.write(to: Paths.groupsJSON, options: .atomic)
-            try? snapshot.3?.write(to: Paths.bookmarksJSON, options: .atomic)
-            try? snapshot.4?.write(to: Paths.settingsJSON, options: .atomic)
+            do { try snapshot.0?.write(to: Paths.booksJSON, options: .atomic) }
+            catch { AppLog.error("STORE", "books.json写入失败: \(error.localizedDescription)") }
+            do { try snapshot.1?.write(to: Paths.sourcesJSON, options: .atomic) }
+            catch { AppLog.error("STORE", "sources.json写入失败: \(error.localizedDescription)") }
+            do { try snapshot.2?.write(to: Paths.groupsJSON, options: .atomic) }
+            catch { AppLog.error("STORE", "groups.json写入失败: \(error.localizedDescription)") }
+            do { try snapshot.3?.write(to: Paths.bookmarksJSON, options: .atomic) }
+            catch { AppLog.error("STORE", "bookmarks.json写入失败: \(error.localizedDescription)") }
+            do { try snapshot.4?.write(to: Paths.settingsJSON, options: .atomic) }
+            catch { AppLog.error("STORE", "settings.json写入失败: \(error.localizedDescription)") }
         }
     }
 

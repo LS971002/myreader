@@ -39,6 +39,9 @@ struct DynSourceRef {
     var dirURL = ""
     var detailURL = ""
     var chapterURL = ""
+    /// 书籍级辅助id（七猫 source.helpId 形态：搜索时 _BookFields.helpId 提取，
+    /// 正文/目录组合规则 `bid=source.helpId` 使用——跨流程必须传递）。
+    var helpId = ""
 }
 
 final class DynArr {
@@ -99,7 +102,10 @@ enum DynValue {
         case .str(let s): return s
         case .num(let n): return DynEngine.trimNumber(n)
         case .bool(let b): return b ? "1" : "0"
-        case .jsValue(let v): return v.toString() ?? ""
+        case .jsValue(let v):
+            // JS undefined/null → 空串（避免 "undefined" 污染正文，日志实锤场景）
+            if v.isNull || v.isUndefined { return "" }
+            return v.toString() ?? ""
         default: return ""
         }
     }
@@ -435,6 +441,7 @@ final class DynEngine {
             case "configName": return .str(ctx.source.configName)
             case "dirURL": return .str(ctx.source.dirURL)
             case "detailURL": return .str(ctx.source.detailURL)
+            case "helpId": return .str(ctx.source.helpId)
             case "chapter": return .sourceChapterObj
             default: return .null
             }
@@ -454,7 +461,12 @@ final class DynEngine {
             switch (cls, name) {
             case ("NSMutableArray", "array"): return .arr(DynArr())
             case ("JSContext", "alloc"), ("JSContext", "init"):
-                return .jsContext(JSContext())
+                let js = JSContext()
+                // JS异常处理器：未捕获JS异常→日志（如CryptoJS解密失败）
+                js.exceptionHandler = { _, exception in
+                    AppLog.error("JS", "JS异常: \(exception?.toString() ?? "?")")
+                }
+                return .jsContext(js)
             default: return .null
             }
         case .jsContext:
@@ -586,7 +598,14 @@ final class DynEngine {
             switch selector {
             case "evaluateScript":
                 let code = arg0?.stringValue ?? ""
-                return .jsValue(js.evaluateScript(code))
+                let value = js.evaluateScript(code)
+                if value == nil || (value?.isNull ?? true) {
+                    AppLog.warn("JS", "evaluateScript无返回（脚本前80: \(code.prefix(80))）")
+                }
+                if let e = js.objectForKeyedSubscript("__jsError__"), !e.isNull {
+                    AppLog.error("JS", "JS执行异常: \(e.toString() ?? "?")")
+                }
+                return .jsValue(value)
             case "objectForKeyedSubscript":
                 return .jsValue(js.objectForKeyedSubscript(arg0?.stringValue ?? ""))
             default:

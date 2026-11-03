@@ -14,8 +14,10 @@ enum BookActions {
         book.sourceID = source.id
         book.sourceName = source.name
         book.detailURL = result.link
+        book.helpId = result.helpId
 
         let engine = IBSEngine(source: source)
+        engine.helpId = result.helpId
         // 目录
         if let chapters = try? await engine.directory(link: result.link) {
             book.chapters = chapters
@@ -100,6 +102,8 @@ enum BookActions {
             throw BookSourceEngineError.missingSource
         }
         updated.detailURL = match.link
+        updated.helpId = match.helpId
+        engine.helpId = match.helpId
         let chapters = try await engine.directory(link: match.link)
         guard !chapters.isEmpty else {
             AppLog.error("SOURCE", "换源失败：新源目录解析0章（detailURL=\(match.link.prefix(60))）")

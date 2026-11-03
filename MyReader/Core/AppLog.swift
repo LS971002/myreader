@@ -36,6 +36,45 @@ final class AppLog {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         buildHeader()
         autoCleanOldFiles()
+        installCrashHandlers()
+    }
+
+    // MARK: - 崩溃捕获（未捕异常 + 致命信号 → 崩溃日志文件，导出可见）
+
+    private func installCrashHandlers() {
+        NSSetUncaughtExceptionHandler { exception in
+            let report = """
+            ===== CRASH（未捕获异常）=====
+            时间: \(Date())
+            名称: \(exception.name.rawValue)
+            原因: \(exception.reason ?? "-")
+            堆栈:
+            \(exception.callStackSymbols.joined(separator: "\n"))
+
+            """
+            AppLog.shared.writeCrashReport(report)
+        }
+        let signalNames: [Int32: String] = [SIGABRT: "SIGABRT", SIGSEGV: "SIGSEGV",
+                                            SIGBUS: "SIGBUS", SIGILL: "SIGILL", SIGFPE: "SIGFPE"]
+        for sig in signalNames.keys {
+            signal(sig) { code in
+                let report = """
+                ===== CRASH（信号 \(signalNames[code] ?? "SIG\(code)")）=====
+                时间: \(Date())
+                （信号处理器内不可安全调用复杂API，此为精简记录）
+
+                """
+                AppLog.shared.writeCrashReport(report)
+                signal(code, SIG_DFL)
+                raise(code)
+            }
+        }
+    }
+
+    /// 崩溃报告写入（同步直写，不经队列——崩溃场景不能依赖异步）。
+    func writeCrashReport(_ text: String) {
+        let url = dir.appendingPathComponent("crash-\(Int(Date().timeIntervalSince1970)).log")
+        try? text.data(using: .utf8)?.write(to: url)
     }
 
     private func buildHeader() {
