@@ -54,7 +54,9 @@ final class AppLog {
             """
             AppLog.shared.writeCrashReport(report)
         }
-        let signals: [Int32] = [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE]
+        // SIGTRAP(5)：Swift 运行时的数组越界 / 强解包 nil / fatalError 都走 trap，
+        // 之前没装 → 「搜索时闪退」这类崩溃一条日志都没有。
+        let signals: [Int32] = [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP]
         for sig in signals {
             // 必须是 C 函数指针（不能捕获上下文）→ 使用文件级函数
             signal(sig, myreaderFatalSignalHandler)
@@ -250,6 +252,7 @@ private func myreaderFatalSignalHandler(_ sig: Int32) {
     case SIGBUS: name = "SIGBUS"
     case SIGILL: name = "SIGILL"
     case SIGFPE: name = "SIGFPE"
+    case SIGTRAP: name = "SIGTRAP"
     default: name = "SIG\(sig)"
     }
     let report = """

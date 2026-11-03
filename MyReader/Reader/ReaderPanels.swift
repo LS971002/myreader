@@ -303,7 +303,10 @@ final class SpeechCenter: NSObject, ObservableObject, AVSpeechSynthesizerDelegat
     private override init() {
         super.init()
         synthesizer.delegate = self
-        applyAudioSession()
+        // ⚠️ 这里绝对不能 setActive(true)：SpeechCenter.shared 在 RootView 里被引用，
+        // App 冷启动即创建单例 → 激活 .playback 会话会打断后台正在播放的音乐/播客。
+        // 配置只做「混合」声明，真正激活留到开始朗读时。
+        prepareAudioSession()
         setupRemoteCommands()
     }
 
@@ -348,13 +351,29 @@ final class SpeechCenter: NSObject, ObservableObject, AVSpeechSynthesizerDelegat
         presented = false
     }
 
-    // MARK: - 音频会话（独占 / 混合 实时切换）
+    // MARK: - 音频会话（独占 / 混合）
 
-    func applyAudioSession() {
+    /// 只声明类别，**不激活**：App 启动阶段调用也不会打断其他 App 的音频。
+    func prepareAudioSession() {
         let session = AVAudioSession.sharedInstance()
         let options: AVAudioSession.CategoryOptions = mixAudio ? [.mixWithOthers] : []
         try? session.setCategory(.playback, mode: .spokenAudio, options: options)
-        try? session.setActive(true)
+    }
+
+    /// 朗读真正开始/切换混合模式时调用：此时才激活会话。
+    func applyAudioSession() {
+        prepareAudioSession()
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            AppLog.warn("TTS", "音频会话激活失败: \(error.localizedDescription)")
+        }
+    }
+
+    /// 朗读结束：把音频会话交还系统（其他 App 的音乐可以恢复）。
+    private func releaseAudioSession() {
+        try? AVAudioSession.sharedInstance().setActive(false,
+                                                       options: .notifyOthersOnDeactivation)
     }
 
     // MARK: - 启动
@@ -391,6 +410,8 @@ final class SpeechCenter: NSObject, ObservableObject, AVSpeechSynthesizerDelegat
         synthesizer.stopSpeaking(at: .immediate)
         utteranceIndex.removeAll()
         highlightRange = nil
+        // 真正开始朗读时才激活音频会话（App 启动阶段不碰，避免打断后台音乐）
+        applyAudioSession()
         for k in index...min(index + 2, segments.count - 1) {
             enqueue(k)
         }
@@ -513,6 +534,8 @@ final class SpeechCenter: NSObject, ObservableObject, AVSpeechSynthesizerDelegat
         currentSegment = 0
         playedStack.removeAll()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        // 交还音频会话：其他 App（音乐/播客）可自动恢复播放
+        releaseAudioSession()
     }
 
     // MARK: - 切分（按句边界聚合，对齐源APP「本地听书分段字符数」）

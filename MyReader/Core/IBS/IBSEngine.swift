@@ -73,8 +73,13 @@ final class IBSEngine {
                 return (text, nil)
             }
         } else {
+            // 阶段日志：解析页导致闪退时能精确定位是哪一步（此前这段静默，崩溃无痕迹）
+            AppLog.debug("SEARCH", "〔\(source.name)〕解析DOM \(step.text.count)字")
             let dom = HTMLParser.parse(step.text)
-            entries = ExSelector.parse(listRule).select(from: dom).map { ($0.textContent, $0) }
+            AppLog.debug("SEARCH", "〔\(source.name)〕DOM就绪，执行 _list 选择器")
+            let selected = ExSelector.parse(listRule).select(from: dom)
+            AppLog.debug("SEARCH", "〔\(source.name)〕选择器命中 \(selected.count) 节点")
+            entries = selected.map { ($0.textContent, $0) }
         }
         guard !entries.isEmpty else {
             AppLog.warn("SEARCH", "〔\(source.name)〕列表为空（_list: \(listRule.prefix(60))）"
@@ -87,8 +92,13 @@ final class IBSEngine {
         var seen = Set<String>()
 
         for entry in entries.prefix(80) {
-            let title = runFieldOn(runner, parser: step.parser, name: "bookName",
+            var title = runFieldOn(runner, parser: step.parser, name: "bookName",
                                    input: entry.input, node: entry.node) ?? ""
+            // 书名清洗：真实书源偶尔把整段简介塞进 title（几十万字），
+            // 会拖垮 UI 排版与聚合逻辑
+            title = title.replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if title.count > 100 { title = String(title.prefix(100)) }
             guard !title.isEmpty else { continue }
             let key = title + "|" + (fieldRules(step.parser, "dirURL")?.first ?? "")
             if !seen.insert(key).inserted { continue }
@@ -110,19 +120,29 @@ final class IBSEngine {
                 AppLog.debug("SEARCH", "〔\(source.name)〕helpId提取：\(helpId.prefix(20))")
             }
 
+            // 简介/最新章节做长度上限：个别源会取到整页文本，UI 渲染与 Hashable
+            // 计算会被拖到秒级（曾表现为「搜索时闪退」）
+            var intro = runFieldOn(runner, parser: step.parser, name: "desc", input: entry.input, node: entry.node) ?? ""
+            if intro.count > 800 { intro = String(intro.prefix(800)) }
+            var latest = runFieldOn(runner, parser: step.parser, name: "lastChapterTitle", input: entry.input, node: entry.node) ?? ""
+            latest = latest.trimmingCharacters(in: .whitespacesAndNewlines)
+            if latest.count > 120 { latest = String(latest.prefix(120)) }
+            var authorText = author.trimmingCharacters(in: .whitespacesAndNewlines)
+            if authorText.count > 60 { authorText = String(authorText.prefix(60)) }
+
             results.append(SearchResult(
                 sourceID: source.id,
                 sourceName: source.name,
                 title: title,
-                author: author,
+                author: authorText,
                 helpId: helpId,
                 link: link,
                 cover: HTTPClient.absolute(
                     runFieldOn(runner, parser: step.parser, name: "coverUrl", input: entry.input, node: entry.node) ?? "",
                     base: source.homeURL),
-                intro: runFieldOn(runner, parser: step.parser, name: "desc", input: entry.input, node: entry.node) ?? "",
-                latest: runFieldOn(runner, parser: step.parser, name: "lastChapterTitle", input: entry.input, node: entry.node) ?? "",
-                matchKind: Self.classify(title: title, author: author, keyword: trimmed)
+                intro: intro,
+                latest: latest,
+                matchKind: Self.classify(title: title, author: authorText, keyword: trimmed)
             ))
         }
         AppLog.info("SEARCH", "〔\(source.name)〕完成：\(results.count) 本书")

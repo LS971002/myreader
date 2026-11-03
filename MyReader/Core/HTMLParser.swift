@@ -23,9 +23,22 @@ final class HTMLNode {
         children.append(node)
     }
 
+    /// 文本聚合用**迭代**而非递归：
+    /// 论坛/小说站常有几千层畸形嵌套（未闭合 div），递归会在主线程爆栈直接崩，
+    /// 而崩溃现场正是「搜索某源时解析结果页闪退」。
     var textContent: String {
         if isText { return textValue ?? "" }
-        return children.map(\.textContent).joined()
+        var out = ""
+        var stack: [HTMLNode] = [self]
+        while let node = stack.popLast() {
+            if node.isText {
+                out += node.textValue ?? ""
+                continue
+            }
+            // reversed：保证与递归顺序一致（先序遍历）
+            stack.append(contentsOf: node.children.reversed())
+        }
+        return out
     }
 
     var ownText: String {
@@ -57,11 +70,33 @@ final class HTMLNode {
 
     var idValue: String? { attrs["id"] }
 
-    /// 用于调试 / @html 取值
+    /// 用于调试 / `@html` 取值（同样改迭代，避免深嵌套爆栈）
     func outerHTML() -> String {
         if isText { return textValue ?? "" }
-        let a = attrs.map { " \($0.key)=\"\($0.value)\"" }.joined()
-        return "<\(tag)\(a)>\(children.map { $0.outerHTML() }.joined())</\(tag)>"
+        enum Item {
+            case open(HTMLNode)
+            case close(String)
+        }
+        var out = ""
+        var stack: [Item] = [.open(self)]
+        while let item = stack.popLast() {
+            switch item {
+            case .close(let tag):
+                out += "</\(tag)>"
+            case .open(let node):
+                if node.isText {
+                    out += node.textValue ?? ""
+                    continue
+                }
+                let a = node.attrs.map { " \($0.key)=\"\($0.value)\"" }.joined()
+                out += "<\(node.tag)\(a)>"
+                stack.append(.close(node.tag))
+                for child in node.children.reversed() {
+                    stack.append(.open(child))
+                }
+            }
+        }
+        return out
     }
 }
 
@@ -72,11 +107,22 @@ enum HTMLParser {
     ]
     private static let rawTags: Set<String> = ["script", "style"]
 
+    /// 解析硬上限：畸形页面（几千层未闭合标签 / 几十万节点）会撑爆内存与栈，
+    /// 表现为「搜索某源时闪退」。超限后停止建树，保留已解析部分。
+    private static let maxNodes = 40_000
+    private static let maxDepth = 400
+
     static func parse(_ html: String) -> HTMLNode {
         let root = HTMLNode(tag: "#root")
         var stack: [HTMLNode] = [root]
         let chars = Array(html)
         var i = 0
+        var nodeCount = 0
+
+        func budgetLeft() -> Bool {
+            nodeCount += 1
+            return nodeCount < Self.maxNodes
+        }
 
         func appendText(_ text: String) {
             guard !text.isEmpty, let top = stack.last else { return }
@@ -129,10 +175,13 @@ enum HTMLParser {
                 let tagName = name.lowercased()
                 guard !tagName.isEmpty else { continue }
 
+                guard budgetLeft() else { break }
                 let node = HTMLNode(tag: tagName, attrs: parseAttrs(attrString))
                 stack.last?.append(node)
 
                 if voidTags.contains(tagName) || selfClosed { continue }
+                // 嵌套过深：不再入栈（否则后续 textContent / select 递归或 O(n²) 爆炸）
+                if stack.count >= maxDepth { continue }
 
                 if rawTags.contains(tagName) {
                     // 跳过脚本/样式内容直到对应结束标签

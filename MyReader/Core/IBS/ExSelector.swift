@@ -180,6 +180,10 @@ struct ExSelector {
 
     // MARK: - 查询
 
+    /// 单段候选上限：畸形页面（数万节点）下 `elements()` × 去重是 O(n²)，
+    /// 曾把主线程拖到被系统 kill。
+    private static let maxCandidates = 4_000
+
     /// 返回匹配节点集合（无取值段时）。
     func select(from root: HTMLNode) -> [HTMLNode] {
         if let steps = xpathSteps {
@@ -193,7 +197,7 @@ struct ExSelector {
             for scope in current {
                 let candidates: [HTMLNode]
                 if i == 0 || segment.descendant {
-                    candidates = scope.elements().filter { $0 !== scope }
+                    candidates = Array(scope.elements().filter { $0 !== scope }.prefix(Self.maxCandidates))
                 } else {
                     candidates = scope.children.filter { !$0.isText }
                 }
@@ -202,6 +206,7 @@ struct ExSelector {
                         matched.append(node)
                     }
                 }
+                if matched.count > Self.maxCandidates { break }
             }
             if let limit = segment.limit, matched.count > limit {
                 matched = Array(matched.prefix(limit))
@@ -243,6 +248,9 @@ struct ExSelector {
         }
         value = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return nil }
+        // 兜底截断：某些源 `@ex:body` 这类规则会取到整页文本（几十万字），
+        // 后续拼 URL / 正则会让主线程长时间占用。
+        if value.count > 200_000 { value = String(value.prefix(200_000)) }
         if let pattern = replacePattern {
             value = ExSelector.regexReplace(value, pattern: pattern, template: replaceTemplate)
         }

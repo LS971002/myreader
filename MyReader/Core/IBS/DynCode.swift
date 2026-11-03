@@ -603,17 +603,47 @@ final class DynEngine {
         }
     }
 
+    /// 已实现的 selector 白名单（按接收者类型）。
+    /// 只有**真正没实现**的 selector 才记日志 —— 否则 `setValue:forHTTPHeaderField:`
+    /// 这类返回 void 的方法也会被误报成「未实现」，把真正的缺失淹掉。
+    private static let handledSelectors: [String: Set<String>] = [
+        "self": ["respContent", "taskObject", "parent", "currentRequestUrl", "responseHeaders", "task"],
+        "parent": ["parent", "currentRequestUrl", "respContent", "taskObject", "responseHeaders", "task"],
+        "taskObject": ["session", "response", "resp"],
+        "session": ["response"],
+        "response": ["allHeaderFields", "headers", "allHTTPHeaderFields", "statusCode", "code"],
+        "source": ["configName", "dirURL", "detailURL", "helpId", "chapter"],
+        "source.chapter": ["url"],
+        "http": ["httpManager"],
+        "httpManager": ["requestSerializer"],
+        "requestSerializer": ["setValue", "mutableHTTPRequestHeaders"],
+        "mutableHTTPRequestHeaders": ["removeObjectForKey"],
+        "rule": ["get", "put"],
+        "NSString": ["containsString", "substringFromIndex", "substringToIndex",
+                     "jxd_executeRegexRules", "componentsSeparatedByString",
+                     "stringByReplacingOccurrencesOfString", "stringByAppendingString", "appending",
+                     "isEqualToString", "hasPrefix", "hasSuffix", "rangeOfString",
+                     "stringByAddingPercentEncoding", "stringByRemovingPercentEncoding",
+                     "dataUsingEncoding", "stringByAppendingPathComponent", "uppercaseString",
+                     "lowercaseString", "capitalizedString"],
+        "NSMutableArray": ["addObject", "count", "objectAtIndex", "objectAtIndexedSubscript",
+                           "firstObject", "lastObject", "componentsJoinedByString", "joined",
+                           "removeAllObjects"],
+        "Class(JxdSecuritySub)": ["Utf8Encoded", "MD5", "MD5Upper", "SHA1",
+                                  "Base64Encode", "Base64Decode", "AESDecryptBase64"],
+        "JSContext": ["evaluateScript", "objectForKeyedSubscript"],
+        "JSValue": ["callWithArguments", "toString"],
+        "allHeaderFields": ["objectForKey", "allHeaderFields"]
+    ]
+
     private func dispatch(_ receiver: DynValue, selector: String,
                           arg0: DynValue?, labels: [(String, DynValue)]) -> DynValue {
+        let kind = describe(receiver)
         let result = dispatchImpl(receiver, selector: selector, arg0: arg0, labels: labels)
-        // 记录未实现的 OC 方法（排除常见的「取不到值」正常场景）
         if case .null = result {
-            let ignorable: Set<String> = [
-                "objectForKey", "valueForKey", "get", "toString", "lastObject", "firstObject",
-                "count", "length", "description", "isEqualToString"
-            ]
-            if !ignorable.contains(selector) {
-                Self.noteUnhandled(describe(receiver), selector)
+            let handled = Self.handledSelectors[kind]?.contains(selector) ?? false
+            if !handled {
+                Self.noteUnhandled(kind, selector)
             }
         }
         return result
