@@ -14,8 +14,6 @@ struct ReaderView: View {
     @State private var dragOffset: CGFloat = 0
     @State private var isTurning = false            // 翻页动画进行中（防重入）
     @State private var zombieGesture = false        // 动画期间开始的手势会话 → 整段作废
-    /// 拖拽提交翻页期间禁用 move 转场（邻页已跟手滑入，直接切换防叠加闪动）。
-    @State private var suppressTransition = false
     /// 翻页完成后的短冷却截止时刻：一次物理滑动被SwiftUI拆成两个手势会话时，
     /// 第二会话在此期间开始 → zombie 屏蔽（防连翻两页）。
     @State private var cooldownUntil = Date.distantPast
@@ -198,28 +196,16 @@ struct ReaderView: View {
                 // 右邻页（章内下一页 / 下一章首页）
                 neighborPage(edge: .trailing, width: width)
 
-                // 当前页：点击翻页用 move 转场（新页从翻页方向滑入、旧页向对侧滑出），
-                // 拖拽翻页用 offset 跟手（dragOffset 由手势驱动）
+                // 当前页：拖拽/点击翻页统一走 offset 跟手动画。
+                // 不再用 `.id()` + move transition —— 那会在每次翻页销毁并重建
+                // UILabel，连翻时每页都要重新排版 + 重建视图，是卡顿主因。
                 PageCanvas(text: currentPageText,
                            settings: settings,
                            theme: theme.current)
                     .offset(x: dragOffset)
-                    .id(model.book.currentChapter * 100_000 + model.pageIndex)
-                    .transition(pageTransition)
             }
             .allowsHitTesting(false)
         }
-    }
-
-    /// 转场方向：跟随最近一次章节跳转/翻页方向。
-    /// 拖拽提交期间 suppressTransition=true（邻页已跟手滑入，id 变化直接切换，
-    /// 避免 move 转场与滑入动画叠加闪动）。
-    private var pageTransition: AnyTransition {
-        if suppressTransition { return .identity }
-        return .asymmetric(
-            insertion: .move(edge: model.lastJumpForward ? .trailing : .leading),
-            removal: .move(edge: model.lastJumpForward ? .leading : .trailing)
-        )
     }
 
     @ViewBuilder
@@ -299,7 +285,7 @@ struct ReaderView: View {
 
     // MARK: - 翻页动画
 
-    /// 翻页完成（拖拽松手路径）：邻页已跟手滑入 → 提交翻页 → 归零，无缝停留。
+    /// 翻页完成（拖拽松手 / 点击）：邻页已跟手滑入 → 提交翻页 → 归零，无缝停留。
     private func finishTurn(forward: Bool, width: CGFloat) {
         guard !isTurning else { return }
         isTurning = true
@@ -309,43 +295,36 @@ struct ReaderView: View {
         let crossForward = forward && model.neighborNext == nil
         let crossBack = !forward && model.neighborPrev == nil
 
-        withAnimation(.spring(response: 0.30, dampingFraction: 1.0)) {
+        // 0.22s：比原先 0.30s 更快，连翻时手感更跟手
+        withAnimation(.spring(response: 0.22, dampingFraction: 1.0)) {
             dragOffset = target
         }
 
         Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            suppressTransition = true
-            if crossForward {
-                model.goNextChapter()
-            } else if crossBack {
-                model.goPreviousChapter()
-            } else {
-                if forward { model.nextPage() } else { model.prevPage() }
+            try? await Task.sleep(nanoseconds: 220_000_000)
+            // 切页与归零放在同一帧、且禁用动画：避免中间出现一帧「页面已滑出但新页未就位」的空白
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                if crossForward {
+                    model.goNextChapter()
+                } else if crossBack {
+                    model.goPreviousChapter()
+                } else {
+                    if forward { model.nextPage() } else { model.prevPage() }
+                }
+                dragOffset = 0
             }
-            dragOffset = 0
             isTurning = false
-            // 冷却期：吸收同一次物理滑动的残余手势会话
-            cooldownUntil = Date().addingTimeInterval(0.15)
-            // 转场恢复延后（等 id 变化的渲染提交完成后；期间 isTurning/cooldown 挡住点击翻页）
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            suppressTransition = false
+            // 冷却期：吸收同一次物理滑动的残余手势会话（连翻间隔尽量短）
+            cooldownUntil = Date().addingTimeInterval(0.08)
         }
     }
 
-    /// 点击翻页：原生 move 转场（当前页 id 变化触发，新页沿翻页方向滑入、旧页滑出）。
-    private func tapTurn(forward: Bool) {
-        guard !isTurning else { return }
-        isTurning = true
-        model.lastJumpForward = forward
-        withAnimation(.spring(response: 0.35, dampingFraction: 1.0)) {
-            if forward { model.nextPage() } else { model.prevPage() }
-        }
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 360_000_000)
-            isTurning = false
-            cooldownUntil = Date().addingTimeInterval(0.12)
-        }
+    /// 点击翻页：与拖拽共用同一套 offset 动画（当前页滑出 → 切页 → 归零）。
+    /// 不用 move 转场，避免每次翻页重建整页 UILabel。
+    private func tapTurn(forward: Bool, width: CGFloat) {
+        finishTurn(forward: forward, width: width)
     }
 
     // MARK: - 状态栏
@@ -425,6 +404,7 @@ struct ReaderView: View {
         VStack(spacing: 0) {
             HStack {
                 Button {
+                    model.commitProgress()
                     store.flush()
                     dismiss()
                 } label: {
@@ -504,9 +484,9 @@ struct ReaderView: View {
         }
         let third = width / 3
         if x < third {
-            tapTurn(forward: false)
+            tapTurn(forward: false, width: width)
         } else if x > width - third {
-            tapTurn(forward: true)
+            tapTurn(forward: true, width: width)
         } else {
             withAnimation { showMenu = true }
         }
@@ -519,6 +499,14 @@ struct PageCanvas: UIViewRepresentable {
     let settings: AppSettings
     let theme: ReaderTheme
 
+    /// 拖动翻页时 dragOffset 每帧变化都会重算 body，这里缓存上一次的排版 key，
+    /// 文本/字体没变就跳过 NSAttributedString 重建（连翻卡顿的主要来源）。
+    final class Coordinator {
+        var key: String = ""
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeUIView(context: Context) -> UILabel {
         let label = UILabel()
         label.numberOfLines = 0
@@ -529,12 +517,21 @@ struct PageCanvas: UIViewRepresentable {
     }
 
     func updateUIView(_ label: UILabel, context: Context) {
-        label.attributedText = Typography.attributed(
+        let key = Self.cacheKey(text: text, settings: settings, theme: theme)
+        guard key != context.coordinator.key else { return }
+        context.coordinator.key = key
+        label.attributedText = Typography.attributedCached(
             text,
             settings: settings,
             color: UIColor(theme.text),
             title: nil
         )
+    }
+
+    static func cacheKey(text: String, settings: AppSettings, theme: ReaderTheme) -> String {
+        "\(text.count)|\(text.hashValue)|\(settings.fontSize)|\(settings.lineSpacing)"
+            + "|\(settings.paragraphSpacing)|\(settings.fontName)|\(settings.bold)"
+            + "|\(settings.indentFirstLine)|\(theme.text.description)"
     }
 }
 
@@ -546,6 +543,12 @@ struct SelectablePageCanvas: UIViewRepresentable {
     let theme: ReaderTheme
     /// 上下滚动模式：整章文本允许滚动；分页模式只显示当前页，不滚动。
     var scrollable: Bool = false
+
+    final class Coordinator {
+        var key: String = ""
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> UITextView {
         let view = UITextView()
@@ -562,7 +565,11 @@ struct SelectablePageCanvas: UIViewRepresentable {
 
     func updateUIView(_ view: UITextView, context: Context) {
         view.isScrollEnabled = scrollable
-        view.attributedText = Typography.attributed(
+        let key = PageCanvas.cacheKey(text: text, settings: settings, theme: theme)
+            + "|\(scrollable)"
+        guard key != context.coordinator.key else { return }
+        context.coordinator.key = key
+        view.attributedText = Typography.attributedCached(
             text,
             settings: settings,
             color: UIColor(theme.text),

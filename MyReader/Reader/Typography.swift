@@ -52,6 +52,26 @@ enum Typography {
         return body
     }
 
+    /// 排版缓存：翻页时同一段文本会被「当前页 / 邻页」反复取排版，
+    /// 每次重新构造 NSAttributedString 会掉帧（连翻卡顿来源之一）。
+    private static let attributedCache = NSCache<NSString, NSAttributedString>()
+
+    static func attributedCached(
+        _ text: String,
+        settings: AppSettings,
+        color: UIColor,
+        title: String? = nil
+    ) -> NSAttributedString {
+        let raw = "\(text.hashValue)|\(text.count)|\(settings.fontSize)|\(settings.lineSpacing)"
+            + "|\(settings.paragraphSpacing)|\(settings.fontName)|\(settings.bold)"
+            + "|\(settings.indentFirstLine)|\(color.description)|\(title ?? "")"
+        let key = raw as NSString
+        if let cached = attributedCache.object(forKey: key) { return cached }
+        let value = attributed(text, settings: settings, color: color, title: title)
+        attributedCache.setObject(value, forKey: key)
+        return value
+    }
+
     /// 把整章正文切成若干页（纯文本，便于缓存与朗读定位）。
     static func paginate(_ text: String, settings: AppSettings, size: CGSize) -> [String] {
         guard size.width > 0, size.height > 0 else { return [text] }

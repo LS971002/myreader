@@ -10,6 +10,8 @@ struct SettingsView: View {
     @State private var showFontPanel = false
     @State private var exported: URL?
     @State private var message: String?
+    /// 提示自动消失任务（清理日志/缓存后不再常驻挡住界面）
+    @State private var messageTask: Task<Void, Never>?
 
     var body: some View {
         NavigationView {
@@ -68,7 +70,7 @@ struct SettingsView: View {
                         for book in store.books {
                             Paths.removeChapters(bookID: book.id)
                         }
-                        message = "已清理全部章节缓存"
+                        showMessage("已清理全部章节缓存")
                     } label: {
                         Text("清理全部缓存")
                     }
@@ -85,7 +87,7 @@ struct SettingsView: View {
                     }
                     Button(role: .destructive) {
                         let removed = AppLog.shared.clearAll()
-                        message = removed > 0 ? "已清理 \(removed) 个日志文件" : "日志已清空"
+                        showMessage(removed > 0 ? "已清理 \(removed) 个日志文件" : "日志已清空")
                     } label: {
                         Text("清空日志")
                     }
@@ -144,10 +146,25 @@ struct SettingsView: View {
                         .padding(.horizontal, 14).padding(.vertical, 9)
                         .background(.thinMaterial, in: Capsule())
                         .padding(.bottom, 20)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
                 }
             }
+            .animation(.easeInOut(duration: 0.2), value: message)
         }
         .navigationViewStyle(.stack)
+        .onDisappear { messageTask?.cancel() }
+    }
+
+    /// 统一提示：展示后自动消失（原实现只看赋值不清空，提示会一直挂着）。
+    private func showMessage(_ text: String, seconds: TimeInterval = 2.0) {
+        messageTask?.cancel()
+        message = text
+        messageTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(max(0.6, seconds) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            message = nil
+        }
     }
 
     private func exportSources() {
@@ -161,7 +178,7 @@ struct SettingsView: View {
 
     private func backupBooks() {
         guard let book = store.books.first else {
-            message = "书架是空的"
+            showMessage("书架是空的")
             return
         }
         if let url = BookActions.exportTXT(book: book) {

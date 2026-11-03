@@ -104,6 +104,7 @@ final class ReaderModel: ObservableObject {
 
         book.currentChapter = chapterIndex
         book.currentPage = pageIndex
+        progressTask?.cancel()
         store.updateProgress(bookID: bookID, chapter: chapterIndex, page: pageIndex,
                              progress: overallProgress(chapter: chapterIndex, page: pageIndex))
 
@@ -289,8 +290,28 @@ final class ReaderModel: ObservableObject {
         Task { await load(chapterIndex: chapter, targetPage: 0) }
     }
 
+    /// 翻页进度写库节流：每次翻页都写 Store 会让 `@Published books` 变化，
+    /// ReaderView 整个 body（含 3 个邻页）随之重算 → 连翻卡顿。
+    private var progressTask: Task<Void, Never>?
+
     private func persistProgress() {
         book.currentPage = pageIndex
+        let chapter = book.currentChapter
+        let page = pageIndex
+        let progress = overallProgress(chapter: chapter, page: page)
+        progressTask?.cancel()
+        progressTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.store.updateProgress(bookID: self.bookID, chapter: chapter,
+                                      page: page, progress: progress)
+        }
+    }
+
+    /// 退出阅读/切章前立即落库（取消节流任务）。
+    func commitProgress() {
+        progressTask?.cancel()
+        progressTask = nil
         store.updateProgress(bookID: bookID, chapter: book.currentChapter, page: pageIndex,
                              progress: overallProgress(chapter: book.currentChapter, page: pageIndex))
     }

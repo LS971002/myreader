@@ -77,7 +77,8 @@ final class IBSEngine {
             entries = ExSelector.parse(listRule).select(from: dom).map { ($0.textContent, $0) }
         }
         guard !entries.isEmpty else {
-            AppLog.warn("SEARCH", "〔\(source.name)〕列表为空 (_list规则: \(listRule.prefix(60)))")
+            AppLog.warn("SEARCH", "〔\(source.name)〕列表为空（_list: \(listRule.prefix(60))）"
+                        + " 响应\(step.text.count)字 末尾: \(step.text.suffix(120).replacingOccurrences(of: "\n", with: " "))")
             return []
         }
         AppLog.info("SEARCH", "〔\(source.name)〕列表项 \(entries.count) 个（\(listRule.hasPrefix("@json:") ? "JSON" : "DOM")模式）")
@@ -183,7 +184,7 @@ final class IBSEngine {
                                          pageIndex: pageIndex,
                                          parentFrames: [], sourceRef: sourceRef)
             guard let listRules = fieldRules(step.parser, "_list"), let listRule = listRules.first else {
-                AppLog.warn("DIR", "〔\(source.name)〕无_list规则")
+                AppLog.warn("DIR", "〔\(source.name)〕无_list规则（parser键: \(step.parser.keys.sorted().prefix(6).joined(separator: ","))）")
                 break
             }
             let runner = RuleRunner(ctx: makeContext(step: step, sourceRef: sourceRef))

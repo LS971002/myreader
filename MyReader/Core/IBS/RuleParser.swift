@@ -105,6 +105,20 @@ final class RuleRunner {
             selectorText = String(trimmed.dropFirst(7))
         }
         if trimmed.hasPrefix("@ex:") || trimmed.hasPrefix("@xpath:") || looksLikeSelector(selectorText) {
+            // `A||B` 组合规则（爱阅 executeCombi 语义：逐条尝试，取第一个非空结果）。
+            // 真实书源：`@ex:div[@id=rtext].p||@ex:div[@id=rtext]`。
+            if selectorText.contains("||") {
+                for part in selectorText.components(separatedBy: "||") {
+                    let candidate = part.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !candidate.isEmpty else { continue }
+                    let nested = candidate.hasPrefix("@ex:") || candidate.hasPrefix("@xpath:")
+                        ? candidate : "@ex:" + candidate
+                    if let value = runSingle(nested, input: input, dom: dom), !value.isEmpty {
+                        return value
+                    }
+                }
+                return nil
+            }
             let selector = ExSelector.parse(selectorText)
             let scope: HTMLNode
             if let dom {
@@ -194,12 +208,29 @@ final class RuleRunner {
         return value?.isEmpty == true ? nil : value
     }
 
-    // MARK: @str: 表达式
+    // MARK: @str: 表达式（JxdStringParser）
 
-    /// `"literal"+self` 形式的拼接（self = 输入）。
+    /// `@str:` 语义 = 字符串方法链。
+    /// 逆向依据：`Reverse/rea/01_书源模块.md` 4.3 与 `03_内容过滤与替换模块.md` 第四节
+    /// （JxdStringParser：pos / rpos / mid / del / sub / mark / split / trim / left / right / replace）。
+    /// 真实书源用例：`@str:replace(/book,/book/chapter/)`、`@str:pos(").rpos(").mid`、
+    /// `@str:replace(字数：,)`。
+    /// 同时兼容旧的 `"literal"+self` 拼接写法。
     private func evalStrExpr(_ expr: String, input: String) -> String? {
+        let trimmed = expr.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 以引号开头 = 旧式拼接（`"<li>…</li>"+self`），其中可能含括号
+        if !trimmed.hasPrefix("\""), trimmed.contains("(") {
+            var text = input
+            var pos: Int?
+            var rpos: Int?
+            for call in splitStrCalls(trimmed) {
+                text = applyStrCall(call, to: text, pos: &pos, rpos: &rpos)
+            }
+            return text.isEmpty ? nil : text
+        }
+
         var out = ""
-        var rest = expr.trimmingCharacters(in: .whitespacesAndNewlines)
+        var rest = trimmed
         while !rest.isEmpty {
             if rest.hasPrefix("\"") {
                 guard let close = rest.dropFirst().firstIndex(of: "\"") else {
@@ -226,6 +257,151 @@ final class RuleRunner {
             if rest.hasPrefix("+") { rest = String(rest.dropFirst()) }
         }
         return out.isEmpty ? nil : out
+    }
+
+    /// 按方法链拆 `.`（括号内的点不拆；`pos(")` 这类单引号参数也能正确保留）。
+    private func splitStrCalls(_ expr: String) -> [String] {
+        var calls: [String] = []
+        var current = ""
+        var depth = 0
+        for ch in expr {
+            if ch == "(" { depth += 1 }
+            if ch == ")" { depth -= 1 }
+            if ch == ".", depth == 0 {
+                if !current.isEmpty { calls.append(current); current = "" }
+                continue
+            }
+            current.append(ch)
+        }
+        if !current.isEmpty { calls.append(current) }
+        return calls
+    }
+
+    private func splitStrArgs(_ raw: String) -> [String] {
+        var args: [String] = []
+        var current = ""
+        var depth = 0
+        for ch in raw {
+            if ch == "(" { depth += 1 }
+            if ch == ")" { depth -= 1 }
+            if ch == ",", depth == 0 {
+                args.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+                continue
+            }
+            current.append(ch)
+        }
+        args.append(current.trimmingCharacters(in: .whitespaces))
+        return args
+    }
+
+    private func applyStrCall(_ rawCall: String, to text: String,
+                              pos: inout Int?, rpos: inout Int?) -> String {
+        let call = rawCall.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !call.isEmpty else { return text }
+
+        guard let lp = call.firstIndex(of: "(") else {
+            switch call.lowercased() {
+            case "mid":
+                guard let a = pos, let b = rpos, b >= a,
+                      let start = text.index(text.startIndex, offsetBy: a, limitedBy: text.endIndex),
+                      let end = text.index(text.startIndex, offsetBy: b, limitedBy: text.endIndex) else {
+                    return text
+                }
+                var piece = String(text[start..<end])
+                if piece.hasPrefix("\"") { piece = String(piece.dropFirst()) }
+                if piece.hasSuffix("\"") { piece = String(piece.dropLast()) }
+                return piece
+            case "left":
+                // `@str:pos(:).left` → 取标记左侧内容
+                guard let a = pos,
+                      let cut = text.index(text.startIndex, offsetBy: a, limitedBy: text.endIndex) else {
+                    return text
+                }
+                return String(text[text.startIndex..<cut])
+            case "right":
+                guard let b = rpos,
+                      let cut = text.index(text.startIndex, offsetBy: b, limitedBy: text.endIndex) else {
+                    return text
+                }
+                return String(text[cut...])
+            case "trim":
+                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            default:
+                return text
+            }
+        }
+
+        let name = String(call[call.startIndex..<lp]).lowercased()
+        var argsRaw = String(call[call.index(after: lp)...])
+        if argsRaw.hasSuffix(")") { argsRaw = String(argsRaw.dropLast()) }
+        let args = splitStrArgs(argsRaw)
+
+        switch name {
+        case "replace", "replacingoccurrencesofstring":
+            guard args.count >= 2 else { return text }
+            return text.replacingOccurrences(of: args[0], with: args[1])
+        case "pos", "rpos":
+            let token = args.first ?? "\""
+            guard !token.isEmpty else { return text }
+            let options: String.CompareOptions = (name == "rpos") ? .backwards : String.CompareOptions()
+            // 半角/全角冒号互通（书源常用 `pos(:)`，正文却是「作者：xxx」）
+            var found = text.range(of: token, options: options)
+            if found == nil {
+                let alternate = token == ":" ? "：" : (token == "：" ? ":" : nil)
+                if let alternate {
+                    found = text.range(of: alternate, options: options)
+                }
+            }
+            guard let range = found else { return text }
+            pos = text.distance(from: text.startIndex, to: range.lowerBound)
+            rpos = text.distance(from: text.startIndex, to: range.upperBound)
+            return text
+        case "mid":
+            guard let a = pos, let b = rpos, b >= a,
+                  let start = text.index(text.startIndex, offsetBy: a, limitedBy: text.endIndex),
+                  let end = text.index(text.startIndex, offsetBy: b, limitedBy: text.endIndex) else {
+                return text
+            }
+            var piece = String(text[start..<end])
+            if piece.hasPrefix("\"") { piece = String(piece.dropFirst()) }
+            if piece.hasSuffix("\"") { piece = String(piece.dropLast()) }
+            return piece
+        case "del":
+            guard let n = Int(args.first ?? "0"), n >= 0 else { return text }
+            let utf16 = Array(text.utf16)
+            guard n < utf16.count else { return "" }
+            return String(decoding: utf16[n...], as: UTF16.self)
+        case "sub":
+            guard args.count >= 2,
+                  let a = Int(args[0]), let b = Int(args[1]), a >= 0, b >= a else { return text }
+            let utf16 = Array(text.utf16)
+            guard a < utf16.count else { return "" }
+            return String(decoding: utf16[a..<min(b, utf16.count)], as: UTF16.self)
+        case "left":
+            guard let n = Int(args.first ?? "0"), n >= 0 else { return text }
+            let utf16 = Array(text.utf16)
+            return String(decoding: utf16[..<min(n, utf16.count)], as: UTF16.self)
+        case "right":
+            guard let n = Int(args.first ?? "0"), n >= 0 else { return text }
+            let utf16 = Array(text.utf16)
+            let start = max(0, utf16.count - n)
+            return String(decoding: utf16[start...], as: UTF16.self)
+        case "split":
+            let sep = args.first ?? ","
+            let index = args.count > 1 ? (Int(args[1]) ?? 0) : 0
+            let parts = text.components(separatedBy: sep)
+            return parts.indices.contains(index) ? parts[index] : ""
+        case "mark":
+            // 标记定位：mark(x) 仅记录位置，不改变文本
+            if let token = args.first, let range = text.range(of: token) {
+                pos = text.distance(from: text.startIndex, to: range.lowerBound)
+                rpos = text.distance(from: text.startIndex, to: range.upperBound)
+            }
+            return text
+        default:
+            return text
+        }
     }
 
     // MARK: 工具

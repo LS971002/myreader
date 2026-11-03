@@ -418,6 +418,10 @@ final class DynEngine {
             case "respContent": return .str(ctx.respContent)
             case "taskObject": return .taskObj
             case "parent": return .parentObj(0)
+            // 真实书源（错层）：`u=format("%@",self.currentRequestUrl);`
+            case "currentRequestUrl":
+                return .str(ctx.parentChain.first?.currentRequestUrl ?? "")
+            case "responseHeaders": return .headers(ctx.responseHeaders)
             default: return .null
             }
         case .parentObj(let depth):
@@ -456,6 +460,9 @@ final class DynEngine {
             return .null
         case .str(let s):
             if name == "length" { return .num(Double(s.utf16.count)) }
+            // 无参扩展方法（真实书源：`c=c.jxd_replaceUnicode;`）
+            if name == "jxd_replaceUnicode" { return .str(Self.replaceUnicode(s)) }
+            if name == "jxd_trim" { return .str(s.trimmingCharacters(in: .whitespacesAndNewlines)) }
             return .null
         case .classRef(let cls):
             switch (cls, name) {
@@ -691,10 +698,56 @@ final class DynEngine {
         }
     }
 
+    // MARK: jxd_replaceUnicode
+
+    /// `\uXXXX` 与常见转义还原（真实书源正文：`c=c.jxd_replaceUnicode;`，
+    /// 用来把网页里被转义的正文还原成中文）。
+    static func replaceUnicode(_ text: String) -> String {
+        guard text.contains("\\u") || text.contains("\\n") || text.contains("\\t") else { return text }
+        var out = text
+        if out.contains("\\u") {
+            let pattern = #"\\u([0-9a-fA-F]{4})"#
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                let ns = out as NSString
+                let matches = regex.matches(in: out, range: NSRange(location: 0, length: ns.length))
+                if !matches.isEmpty {
+                    var result = ""
+                    var cursor = 0
+                    for match in matches {
+                        if match.range.location > cursor {
+                            result += ns.substring(with: NSRange(location: cursor,
+                                                                 length: match.range.location - cursor))
+                        }
+                        let hex = ns.substring(with: match.range(at: 1))
+                        if let code = UInt32(hex, radix: 16), let scalar = Unicode.Scalar(code) {
+                            result.append(Character(scalar))
+                        } else {
+                            result += ns.substring(with: match.range)
+                        }
+                        cursor = match.range.location + match.range.length
+                    }
+                    if cursor < ns.length {
+                        result += ns.substring(with: NSRange(location: cursor, length: ns.length - cursor))
+                    }
+                    out = result
+                }
+            }
+        }
+        out = out.replacingOccurrences(of: "\\r", with: "\r")
+            .replacingOccurrences(of: "\\n", with: "\n")
+            .replacingOccurrences(of: "\\t", with: "\t")
+            .replacingOccurrences(of: "\\/", with: "/")
+        return out
+    }
+
     // MARK: jxd_executeRegexRules
 
     /// 规则含 ` @=>`：替换模式（pattern @=>replacement，可空=删除）；
     /// 否则提取模式：返回第一个匹配（group 1 优先）。
+    /// 提取模式无匹配时返回**原文**（后处理管道语义：不命中不改写内容）。
+    /// 证据：00小说书源 `@dyn: s=h.jxd_executeRegexRules:r`（r=`[^"]+(?="$)`）
+    /// 用于把首页 form action 写入 `rule.put url`，原文 `/search6e.html` 不含引号必然不命中；
+    /// 若返回空则该源在爱阅里也无法搜索，与"该源可正常使用"的实际行为矛盾。
     static func executeRegex(_ content: String, rule: String) -> DynValue {
         if let range = rule.range(of: " @=>") {
             let pattern = String(rule[rule.startIndex..<range.lowerBound])
@@ -708,10 +761,14 @@ final class DynEngine {
                 withTemplate: replacement)
             return .str(result)
         }
-        guard let regex = try? NSRegularExpression(pattern: rule) else { return .null }
+        guard let regex = try? NSRegularExpression(pattern: rule) else {
+            AppLog.warn("JS", "executeRegexRules 正则非法，保留原文: \(rule.prefix(60))")
+            return .str(content)
+        }
         let ns = content as NSString
         guard let match = regex.firstMatch(in: content, range: NSRange(location: 0, length: ns.length)) else {
-            return .null
+            // 不命中 → 原样返回（管道语义，见方法注释）
+            return .str(content)
         }
         if match.numberOfRanges > 1 {
             let range = match.range(at: 1)
