@@ -254,9 +254,14 @@ final class IBSEngine {
         var seenTitles = Set<String>()
         var firstPageText = ""
         var firstPageBase = ""
-        let maxPages = max(node.maxPageCount, 1)
+        // 爱阅 maxPageCount = 0 表示「不设上限，由 nextPageUrl 求值空自终止」
+        // （真实书源常见写法）。这里给 40 页硬上限，并加「连续 2 页无新增即停」
+        // 防止 nextPageUrl 恒返回同一页造成重复请求。
+        let declaredMax = node.maxPageCount
+        let maxPages = declaredMax > 0 ? min(declaredMax, 40) : 40
+        var pagesWithoutNew = 0
 
-        for pageIndex in 0..<min(maxPages, 40) {
+        for pageIndex in 0..<maxPages {
             let step = try await runNode(node, overrideURL: overrideURL, keyword: nil,
                                          pageIndex: pageIndex,
                                          parentFrames: [], sourceRef: sourceRef)
@@ -286,13 +291,17 @@ final class IBSEngine {
             }
             AppLog.info("DIR", "〔\(source.name)〕第\(pageIndex + 1)页列表项 \(entries.count) 个（\(firstListRule.hasPrefix("@json:") ? "JSON" : "DOM")模式）"
                         + (entries.isEmpty ? " _list: \(firstListRule.prefix(90))" : ""))
-            firstPageText = firstPageText.isEmpty ? step.text : firstPageText
+            // 兜底取样用最外层响应：middleHandle 的中间页常是另一套模板（甚至空壳），
+            // 真正含章节链接的是第一次请求的详情/目录页。
+            firstPageText = firstPageText.isEmpty
+                ? (step.layers.last?.text ?? step.text) : firstPageText
             let outermostURL = step.layers.last?.finalURL ?? step.finalURL
             firstPageBase = firstPageBase.isEmpty
                 ? (outermostURL.isEmpty ? source.homeURL : outermostURL) : firstPageBase
             if entries.isEmpty { break }
 
             var emptyFieldSample = ""
+            let addedBefore = chapters.count
             for entry in entries {
                 let view = views[entry.layerIndex]
                 let parser = view.layer.parser
@@ -315,6 +324,14 @@ final class IBSEngine {
             }
             if !emptyFieldSample.isEmpty {
                 AppLog.warn("DIR", "〔\(source.name)〕列表项字段缺失 \(emptyFieldSample)")
+            }
+            // maxPageCount 未声明（0）时靠 nextPageUrl 自终止；若连续 2 页
+            // 没有任何新增章节，判定翻页规则已失效（多为恒返回同一页），停止。
+            let added = chapters.count - addedBefore
+            pagesWithoutNew = added == 0 ? pagesWithoutNew + 1 : 0
+            if pagesWithoutNew >= 2 {
+                AppLog.debug("DIR", "〔\(source.name)〕连续\(pagesWithoutNew)页无新增章节，停止翻页")
+                break
             }
 
             // 下一页（nextPageUrl 脚本读取 helpId 存入的 next0 / next1）
