@@ -292,7 +292,8 @@ struct ExSelector {
 /// `//tag[predicate]`、`/tag`、`/following-sibling::tag`，
 /// 谓词支持 `contains(text(),"x")`、`@attr="v"`、`text()="v"`、`[n]`。
 /// 依据：`Reverse/rea/01_书源模块.md`（JxdXpathEx / JxdXpathInfo，基于 ONOXML）。
-enum XPathStep {
+/// 注意：必须是 struct —— enum 不能带存储属性（CI 报错 error: enums must not contain stored properties）。
+struct XPathStep {
     enum Axis {
         case descendant
         case child
