@@ -54,20 +54,10 @@ final class AppLog {
             """
             AppLog.shared.writeCrashReport(report)
         }
-        let signalNames: [Int32: String] = [SIGABRT: "SIGABRT", SIGSEGV: "SIGSEGV",
-                                            SIGBUS: "SIGBUS", SIGILL: "SIGILL", SIGFPE: "SIGFPE"]
-        for sig in signalNames.keys {
-            signal(sig) { code in
-                let report = """
-                ===== CRASH（信号 \(signalNames[code] ?? "SIG\(code)")）=====
-                时间: \(Date())
-                （信号处理器内不可安全调用复杂API，此为精简记录）
-
-                """
-                AppLog.shared.writeCrashReport(report)
-                signal(code, SIG_DFL)
-                raise(code)
-            }
+        let signals: [Int32] = [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE]
+        for sig in signals {
+            // 必须是 C 函数指针（不能捕获上下文）→ 使用文件级函数
+            signal(sig, myreaderFatalSignalHandler)
         }
     }
 
@@ -245,4 +235,30 @@ final class AppLog {
         }
         return (buffer.count, files, bytes)
     }
+}
+
+// MARK: - 致命信号处理器
+
+/// 信号处理器参数必须是 C 函数指针，不能捕获任何上下文（闭包捕获会编译失败），
+/// 故定义为文件级函数；处理器内不可安全调用复杂 API，仅做精简记录，
+/// 随后恢复默认处理并重新 raise，保证系统原有崩溃上报不被吞掉。
+private func myreaderFatalSignalHandler(_ sig: Int32) {
+    let name: String
+    switch sig {
+    case SIGABRT: name = "SIGABRT"
+    case SIGSEGV: name = "SIGSEGV"
+    case SIGBUS: name = "SIGBUS"
+    case SIGILL: name = "SIGILL"
+    case SIGFPE: name = "SIGFPE"
+    default: name = "SIG\(sig)"
+    }
+    let report = """
+    ===== CRASH（信号 \(name)）=====
+    时间: \(Date())
+    （信号处理器内不可安全调用复杂API，此为精简记录）
+
+    """
+    AppLog.shared.writeCrashReport(report)
+    signal(sig, SIG_DFL)
+    raise(sig)
 }
