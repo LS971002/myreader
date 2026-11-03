@@ -18,6 +18,8 @@ final class ReaderModel: ObservableObject {
     private var size: CGSize = .zero
     private var goToLastPage = false
     private var task: Task<Void, Never>?
+    /// load 代次：用于并发去重（同一章被多次触发时只让最后一次生效）。
+    private var loadGeneration = 0
 
     init(store: Store, book: Book) {
         self.store = store
@@ -70,11 +72,18 @@ final class ReaderModel: ObservableObject {
         guard book.chapters.indices.contains(chapterIndex) else { return }
         guard size.width > 10 else { return }
 
+        // 并发去重：onAppear / updateLayout(reloadPagination) / 手势 可能在同一瞬间
+        // 各起一次 load，日志(13) 出现过同一章被请求并分页 6 次。
+        // 只让最后一次生效，先前那次在 await 之后主动放弃（不写状态、不写缓存）。
+        loadGeneration += 1
+        let generation = loadGeneration
+
         loading = true
-        defer { loading = false }
         errorMessage = nil
 
         let text = await chapterText(chapterIndex)
+        guard generation == loadGeneration else { return }
+        loading = false
         guard !text.isEmpty else {
             errorMessage = "该章节暂时没有内容，可尝试换源或稍后重试"
             pages = [""]

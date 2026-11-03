@@ -125,9 +125,20 @@ final class HTTPClient {
         let contentEncoding = (response as? HTTPURLResponse)?
             .value(forHTTPHeaderField: "Content-Encoding")?.lowercased() ?? ""
         let data: Data
-        if contentEncoding.contains("gzip") {
-            data = Self.gunzip(rawData) ?? rawData
-            AppLog.warn("HTTP", "  gzip兜底解压: 输入\(rawData.count)B → 输出\(data.count)B")
+        // 只在数据真的是 gzip 流（魔数 1f 8b）时才解压：
+        // URLSession 默认已自动解压，此时响应头仍留着 Content-Encoding: gzip，
+        // 原来无条件解压会对已解压的数据反复失败（日志(13) 里成百条
+        // 「输入14008B → 输出14008B」的噪音 WARN）。
+        let looksGzipped = rawData.count > 2 && rawData[rawData.startIndex] == 0x1f
+            && rawData[rawData.startIndex + 1] == 0x8b
+        if contentEncoding.contains("gzip"), looksGzipped {
+            if let unzipped = Self.gunzip(rawData) {
+                data = unzipped
+                AppLog.debug("HTTP", "  gzip手动解压: \(rawData.count)B → \(data.count)B")
+            } else {
+                data = rawData
+                AppLog.warn("HTTP", "  gzip解压失败，按原数据解析（\(rawData.count)B）")
+            }
         } else {
             data = rawData
         }
