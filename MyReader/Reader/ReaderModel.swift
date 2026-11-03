@@ -20,6 +20,10 @@ final class ReaderModel: ObservableObject {
     private var task: Task<Void, Never>?
     /// load 代次：用于并发去重（同一章被多次触发时只让最后一次生效）。
     private var loadGeneration = 0
+    /// 在途的正文请求（章节序号 → 任务）。同一章并发请求只发一次。
+    private var inflight: [Int: Task<String, Never>] = [:]
+    private var inflightToken: [Int: Int] = [:]
+    private var inflightSeq = 0
 
     init(store: Store, book: Book) {
         self.store = store
@@ -137,6 +141,31 @@ final class ReaderModel: ObservableObject {
                 return cached
             }
         }
+        // 并发合流：正读章节与预取可能同时请求同一章
+        // （日志(14)：章节[0] 被连续请求 2 次，1~6 章各被预取 2 轮）。
+        // 已在途则直接等它的结果，不再发第二个请求。
+        if let inflightTask = inflight[index] {
+            return await inflightTask.value
+        }
+        inflightSeq += 1
+        let token = inflightSeq
+        inflightToken[index] = token
+        let task = Task { @MainActor [weak self] () -> String in
+            guard let self else { return "" }
+            let text = await self.fetchChapterText(index)
+            // 仅清理自己这一轮（期间可能已发起新一轮，别把新任务清掉）
+            if self.inflightToken[index] == token {
+                self.inflight[index] = nil
+                self.inflightToken[index] = nil
+            }
+            return text
+        }
+        inflight[index] = task
+        return await task.value
+    }
+
+    /// 实际取正文（网络 + 落盘）。只由 chapterText 的合流任务调用。
+    private func fetchChapterText(_ index: Int) async -> String {
         guard book.origin == .online else { return "" }
         guard let sourceID = book.sourceID,
               let source = store.source(id: sourceID),

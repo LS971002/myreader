@@ -262,12 +262,27 @@ struct ExSelector {
             default:
                 value = node.attr(String(attr.dropFirst())) ?? ""
             }
+        } else if nodes.count > 1 {
+            // 多节点 → **HTML 拼接**（不是纯文本）。
+            // 逆向依据：JxdXpathInfo.analyzeContent:needHandleCondition:err: @0x100109658
+            //   0x1001098b0  cmp [info+8](mXpathFormatType), #2
+            //                b.ne  → 单个 XPath: 查询分支
+            //                ==2   → stringWithFormat: CFSTR "%@" (0x10111aea8)
+            //                        → 元素 description = XMLString（outerHTML）
+            // checkResult: @0x100109b14 里 count==1 取 objectAtIndex:0、
+            // count>1 返回整个数组，配合上面的 XMLString 格式化，
+            // 即「多命中 = 一组 XML 元素」。
+            // 实证：101Minc 正文规则是
+            //   ["@ex:div[@id=article].p||@ex:div[@id=article]",
+            //    "@regex:[^><]+浏览器转码[^><]+|<p>[^><]*?<a[^>]*?>[\w\W]+?</p> @=>"]
+            // 第二条正则用 `<p>`/`<a>` 匹配，输入必须是 HTML；
+            // 若给纯文本，`[^><]+` 可跨越全文（纯文本没有尖括号）→ 整段被删 → 正文 0 字
+            // （日志(14) 实锤：content[0] 26124→2249 字，content[1] 2249→0 字）。
+            value = nodes.map { $0.outerHTML() }.joined()
         } else {
-            // 多节点：逐节点取文本按行拼接（JxdXpathEx 取所有命中节点的文本）
-            value = nodes
-                .map { $0.textContent.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-                .joined(separator: "\n")
+            // 单节点 → 文本（书名/作者/状态等单值字段都是这个形态，
+            // 返回 HTML 会把 `<a href=…>` 显示给用户）
+            value = nodes[0].textContent
         }
         value = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return nil }

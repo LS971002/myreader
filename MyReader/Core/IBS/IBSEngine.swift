@@ -324,11 +324,15 @@ final class IBSEngine {
                 // 混进来会被当成第 1 章，换源进度对齐直接错位
                 // （日志(13)：「第一章 灭门！」→「第1章 首页」）。
                 guard Self.looksLikeChapterItem(title: title, url: url, base: base) else { continue }
-                if !seenTitles.insert(title).inserted { continue }
+                let absolute = HTTPClient.absolute(url, base: base)
+                // 去重键 = 标题 + URL：真实站点存在同名章节
+                // （101Minc 目录里「第333章 战争开始（求订阅！）」等 14 组标题重复，
+                //   但指向不同 URL、内容不同）。只按标题去重会丢 15 章（690→675）。
+                if !seenTitles.insert(title + "|" + absolute).inserted { continue }
                 chapters.append(Chapter(
                     index: chapters.count,
                     title: title,
-                    url: HTTPClient.absolute(url, base: base)))
+                    url: absolute))
             }
             if !emptyFieldSample.isEmpty {
                 AppLog.warn("DIR", "〔\(source.name)〕列表项字段缺失 \(emptyFieldSample)")
