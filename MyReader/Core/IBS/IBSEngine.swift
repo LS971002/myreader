@@ -138,8 +138,6 @@ final class IBSEngine {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if title.count > 100 { title = String(title.prefix(100)) }
             guard !title.isEmpty else { continue }
-            let key = title + "|" + (fieldRules(parser, "dirURL")?.first ?? "")
-            if !seen.insert(key).inserted { continue }
 
             AppLog.traceSync("SEARCH", "〔\(source.name)〕项\(entryIndex) 书名=\(title.prefix(20)) 求dirURL")
             let dirURL = runFieldOn(view.runner, parser: parser, name: "dirURL",
@@ -156,6 +154,9 @@ final class IBSEngine {
                 resolvedLink = baseURL
             }
             let link = resolvedLink
+            // 去重键用「书名 + 解析出的链接」：多层 parser 的 dirURL 规则串不同，
+            // 用规则串做键会让同一本书在不同层各留一条。
+            if !seen.insert(title + "|" + link).inserted { continue }
             AppLog.traceSync("SEARCH", "〔\(source.name)〕项\(entryIndex) dirURL=\(dirURL.prefix(48)) link=\(link.prefix(60)) 求作者")
             let author = runFieldOn(view.runner, parser: parser, name: "author",
                                     input: entry.input, node: entry.node) ?? ""
