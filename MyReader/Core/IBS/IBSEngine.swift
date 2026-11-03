@@ -734,6 +734,13 @@ final class IBSEngine {
         if rule.hasPrefix("@json:") {
             let path = String(rule.dropFirst(6))
             return JSONRule.objectArray(path, in: text).compactMap { item -> (input: String, node: HTMLNode?)? in
+                // 标量数组（`_list: @json:types` 形态）直接转文本：
+                // JSONSerialization 不接受顶层片段，原实现会把这类项全丢掉。
+                switch item {
+                case let s as String: return (input: s, node: nil)
+                case let n as NSNumber: return (input: n.stringValue, node: nil)
+                default: break
+                }
                 guard let data = try? JSONSerialization.data(withJSONObject: item),
                       let json = String(data: data, encoding: .utf8) else { return nil }
                 return (input: json, node: nil)
