@@ -2,13 +2,6 @@ import Foundation
 import UIKit
 import Combine
 
-/// ⚠️ 必须 @MainActor：进程崩溃日志（13）显示 SIGABRT / thread=background，
-/// 调用栈 Combine `ObservableObjectPublisher.send` → SwiftUI `flushTransactions`
-/// → UIKitCore 布局 → CoreAutoLayout `NSInternalInconsistencyException`。
-/// 即后台线程写 `@Published`（`book.currentChapter = …` / `pages = …`），
-/// SwiftUI 同步在后台线程触发布局，Auto Layout 直接抛异常终止进程。
-/// 类级隔离后所有 @Published 写都在主线程，await 网络/解析仍会切到后台执行器。
-@MainActor
 final class ReaderModel: ObservableObject {
     let store: Store
     let bookID: UUID
@@ -53,18 +46,18 @@ final class ReaderModel: ObservableObject {
         self.size = size
         guard changed else { return }
         pageCache.removeAll()
-        Task { await reloadCurrentChapter(keepPosition: true) }
+        Task { @MainActor in await self.reloadCurrentChapter(keepPosition: true) }
     }
 
     func reloadPagination() {
         pageCache.removeAll()
-        Task { await reloadCurrentChapter(keepPosition: true) }
+        Task { @MainActor in await self.reloadCurrentChapter(keepPosition: true) }
     }
 
     // MARK: - 打开 / 加载
 
     func onAppear() {
-        Task { await reloadCurrentChapter(keepPosition: false) }
+        Task { @MainActor in await self.reloadCurrentChapter(keepPosition: false) }
     }
 
     private func reloadCurrentChapter(keepPosition: Bool) async {
@@ -167,7 +160,9 @@ final class ReaderModel: ObservableObject {
             return text
         } catch {
             AppLog.error("READER", "章节[\(index)]获取失败: \(error.localizedDescription)")
-            errorMessage = error.localizedDescription
+            // @Published 写一律回主线程（chapterText 可能被后台 Task 调用）
+            let message = error.localizedDescription
+            await MainActor.run { [weak self] in self?.errorMessage = message }
             return ""
         }
     }
@@ -191,15 +186,23 @@ final class ReaderModel: ObservableObject {
             AppLog.error("READER", "目录重建失败，正文可能继续为空")
             return
         }
-        book = updated
-        pageCache.removeAll()
+        // @Published 写回主线程（本函数可能被后台 Task 调用）
+        await MainActor.run { [weak self] in
+            self?.book = updated
+            self?.pageCache.removeAll()
+        }
         AppLog.info("READER", "目录已重建：\(updated.chapters.count)章（第\(updated.currentChapter + 1)章）")
     }
 
     private func prefetchAround(_ index: Int) {
         guard store.settings.autoCacheNext else { return }
         let count = store.settings.preloadCount
-        Task { [weak self] in
+        // ⚠️ 必须 @MainActor：非隔离方法里的裸 `Task {}` 跑在全局并发执行器（后台），
+        // 而 chapterText 内部会写 @Published（errorMessage / book），
+        // 后台写 → Combine send → SwiftUI 在后台线程触发布局 →
+        // CoreAutoLayout 抛 NSInternalInconsistencyException → SIGABRT。
+        // 崩溃日志(13) 调用栈正是这条线。
+        Task { @MainActor [weak self] in
             guard let self else { return }
             for offset in 1...max(1, count) {
                 let target = index + offset
@@ -290,20 +293,20 @@ final class ReaderModel: ObservableObject {
         let next = book.currentChapter + 1
         guard book.chapters.indices.contains(next) else { return }
         lastJumpForward = true
-        Task { await load(chapterIndex: next, targetPage: 0) }
+        Task { @MainActor in await self.load(chapterIndex: next, targetPage: 0) }
     }
 
     func goPreviousChapter() {
         let prev = book.currentChapter - 1
         guard book.chapters.indices.contains(prev) else { return }
         lastJumpForward = false
-        Task { await load(chapterIndex: prev, useLastPage: true) }
+        Task { @MainActor in await self.load(chapterIndex: prev, useLastPage: true) }
     }
 
     func jump(to chapter: Int) {
         guard book.chapters.indices.contains(chapter) else { return }
         lastJumpForward = chapter > book.currentChapter
-        Task { await load(chapterIndex: chapter, targetPage: 0) }
+        Task { @MainActor in await self.load(chapterIndex: chapter, targetPage: 0) }
     }
 
     /// 翻页进度写库节流：每次翻页都写 Store 会让 `@Published books` 变化，
@@ -338,7 +341,7 @@ final class ReaderModel: ObservableObject {
     func reloadAfterSourceChange() {
         pageCache.removeAll()
         goToLastPage = false
-        Task { await load(chapterIndex: book.currentChapter, targetPage: 0) }
+        Task { @MainActor in await self.load(chapterIndex: self.book.currentChapter, targetPage: 0) }
     }
 
     // MARK: - 朗读定位
