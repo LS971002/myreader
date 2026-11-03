@@ -19,6 +19,9 @@ struct ReaderView: View {
     /// 翻页完成后的短冷却截止时刻：一次物理滑动被SwiftUI拆成两个手势会话时，
     /// 第二会话在此期间开始 → zombie 屏蔽（防连翻两页）。
     @State private var cooldownUntil = Date.distantPast
+    /// 文本选择模式：开启后暂停翻页手势，正文换成可长按选字的 UITextView。
+    @State private var selecting = false
+    @State private var toast: String?
 
     init(book: Book, store: Store) {
         _model = StateObject(wrappedValue: ReaderModel(store: store, book: book))
@@ -52,7 +55,7 @@ struct ReaderView: View {
                 .padding(.bottom, bottomInset)
                 .padding(.top, 8)
 
-                if settings.showBatteryAndTime {
+                if settings.showBatteryAndTime && !selecting {
                     statusBar
                 }
 
@@ -70,7 +73,24 @@ struct ReaderView: View {
                         .padding(.horizontal, 30)
                 }
 
-                if showMenu {
+                if selecting {
+                    selectionBar
+                }
+
+                if let toast {
+                    VStack {
+                        Spacer()
+                        Text(toast)
+                            .font(.footnote)
+                            .padding(.horizontal, 14).padding(.vertical, 8)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .padding(.bottom, 90)
+                            .transition(.opacity)
+                    }
+                    .allowsHitTesting(false)
+                }
+
+                if showMenu && !selecting {
                     menuOverlay
                         .transition(.opacity)
                 }
@@ -116,7 +136,9 @@ struct ReaderView: View {
                                 dragOffset = 0
                             }
                         }
-                    }
+                    },
+                // 选择模式下整体禁用翻页手势，把触摸让给 UITextView 的选字/菜单
+                including: selecting ? .none : .all
             )
             .onAppear {
                 model.updateLayout(size: contentSize)
@@ -151,7 +173,17 @@ struct ReaderView: View {
 
     @ViewBuilder
     private func pageContent(width: CGFloat) -> some View {
-        if settings.pageTurn == .scroll {
+        if selecting {
+            // 选择模式：正文渲染为可选 UITextView（长按/双击选字，系统菜单可拷贝）。
+            // 上下滚动模式下给整章文本并允许滚动，分页模式只给当前页。
+            let scrollMode = settings.pageTurn == .scroll
+            SelectablePageCanvas(
+                text: scrollMode ? model.pages.joined(separator: "\n") : currentPageText,
+                settings: settings,
+                theme: theme.current,
+                scrollable: scrollMode
+            )
+        } else if settings.pageTurn == .scroll {
             ScrollView(.vertical, showsIndicators: false) {
                 PageCanvas(text: model.pages.joined(separator: "\n"),
                            settings: settings,
@@ -344,6 +376,49 @@ struct ReaderView: View {
         }
     }
 
+    // MARK: - 选摘（选择 / 复制）
+
+    private var selectionBar: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Text("长按选字后可拷贝")
+                    .font(.caption2)
+                    .foregroundStyle(theme.current.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Button("复制本页") { copyToPasteboard(currentPageText, label: "本页") }
+                    .font(.caption)
+                Button("复制本章") { copyToPasteboard(model.pages.joined(separator: "\n"), label: "本章") }
+                    .font(.caption)
+                Button {
+                    withAnimation { selecting = false }
+                } label: {
+                    Text("完成").font(.caption.weight(.semibold))
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.regularMaterial)
+            Spacer()
+        }
+        .foregroundStyle(Color.primary)
+    }
+
+    private func copyToPasteboard(_ text: String, label: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            AppLog.warn("READER", "复制\(label)失败：内容为空")
+            return
+        }
+        UIPasteboard.general.string = trimmed
+        AppLog.info("READER", "已复制\(label)：\(trimmed.count)字")
+        withAnimation { toast = "已复制\(label)（\(trimmed.count)字）" }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_400_000_000)
+            withAnimation { toast = nil }
+        }
+    }
+
     // MARK: - 菜单
 
     private var menuOverlay: some View {
@@ -380,6 +455,13 @@ struct ReaderView: View {
                 menuButton("上一章", "chevron.up") { model.jump(to: max(0, model.book.currentChapter - 1)) }
                 menuButton("目录", "list.triangle") { showCatalog = true }
                 menuButton("朗读", "waveform") { SpeechCenter.shared.begin(model: model) }
+                // 选摘：进入文本选择模式，可长按选字 / 复制本页与本章
+                menuButton("选摘", "textformat.alt") {
+                    withAnimation {
+                        showMenu = false
+                        selecting = true
+                    }
+                }
                 // 换源（在线书可用）
                 menuButton(model.book.origin == .online ? "换源" : "设置", "arrow.triangle.2.circlepath") {
                     if model.book.origin == .online {
@@ -448,6 +530,39 @@ struct PageCanvas: UIViewRepresentable {
 
     func updateUIView(_ label: UILabel, context: Context) {
         label.attributedText = Typography.attributed(
+            text,
+            settings: settings,
+            color: UIColor(theme.text),
+            title: nil
+        )
+    }
+}
+
+/// 可选中的正文页（选择模式）：排版与 PageCanvas 一致，底层换成 UITextView，
+/// 以便长按/双击选字并调用系统「拷贝」菜单。
+struct SelectablePageCanvas: UIViewRepresentable {
+    let text: String
+    let settings: AppSettings
+    let theme: ReaderTheme
+    /// 上下滚动模式：整章文本允许滚动；分页模式只显示当前页，不滚动。
+    var scrollable: Bool = false
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = scrollable
+        view.backgroundColor = .clear
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.dataDetectorTypes = []
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {
+        view.isScrollEnabled = scrollable
+        view.attributedText = Typography.attributed(
             text,
             settings: settings,
             color: UIColor(theme.text),

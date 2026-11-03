@@ -38,6 +38,10 @@ final class CacheManager: ObservableObject {
 
         let bookID = book.id
         let engine = IBSEngine(source: source)
+        // 正文组合规则可能引用 source.helpId（七猫 `bid=source.helpId`），缓存同样要带上。
+        engine.helpId = book.helpId.isEmpty
+            ? IBSEngine.helpIdFromURL(book.detailURL) : book.helpId
+        let detailURL = book.detailURL
 
         tasks[book.id] = Task { [weak self] in
             var finished = 0
@@ -56,11 +60,13 @@ final class CacheManager: ObservableObject {
                             do {
                                 try Task.checkCancellation()
                                 if let cached = Paths.readChapter(bookID: bookID, index: chapter.index),
-                                   !cached.isEmpty {
+                                   !cached.isEmpty,
+                                   !IBSEngine.looksLikeAPIErrorPayload(cached) {
                                     return true
                                 }
-                                let text = try await engine.content(chapter: chapter)
-                                guard !text.isEmpty else { return false }
+                                let text = try await engine.content(chapter: chapter, detailURL: detailURL)
+                                guard !text.isEmpty,
+                                      !IBSEngine.looksLikeAPIErrorPayload(text) else { return false }
                                 Paths.writeChapter(text, bookID: bookID, index: chapter.index)
                                 return true
                             } catch is CancellationError {

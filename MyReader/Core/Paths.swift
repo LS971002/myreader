@@ -42,6 +42,10 @@ enum Paths {
         try? String(contentsOf: chapterFile(bookID: bookID, index: index), encoding: .utf8)
     }
 
+    static func removeChapter(bookID: UUID, index: Int) {
+        try? FileManager.default.removeItem(at: chapterFile(bookID: bookID, index: index))
+    }
+
     static func removeChapters(bookID: UUID) {
         try? FileManager.default.removeItem(
             at: chapterDir.appendingPathComponent(bookID.uuidString, isDirectory: true))

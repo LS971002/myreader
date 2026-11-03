@@ -187,6 +187,18 @@ final class Store: ObservableObject {
         if let idx = books.firstIndex(where: {
             $0.name == book.name && $0.author == book.author && $0.sourceID == book.sourceID
         }) {
+            // 旧记录残缺（0章 / 无 helpId）时用新解析结果补齐，否则新加入的目录与
+            // helpId 会被静默丢弃 → 正文 `id=` 为空 → 空白正文。
+            if books[idx].chapters.isEmpty && !book.chapters.isEmpty {
+                let keepID = books[idx].id
+                books[idx] = book
+                books[idx].id = keepID
+                books[idx].currentChapter = min(books[idx].currentChapter,
+                                                max(0, book.chapters.count - 1))
+                AppLog.info("STORE", "《\(book.name.prefix(16))》旧记录0章，已用新解析结果替换（\(book.chapters.count)章）")
+            } else if books[idx].helpId.isEmpty && !book.helpId.isEmpty {
+                books[idx].helpId = book.helpId
+            }
             books[idx].lastReadAt = Date()
         } else {
             books.insert(book, at: 0)

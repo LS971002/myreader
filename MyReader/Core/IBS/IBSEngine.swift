@@ -168,7 +168,8 @@ final class IBSEngine {
         var sourceRef = DynSourceRef(configName: source.name)
         sourceRef.dirURL = link
         sourceRef.detailURL = link
-        sourceRef.helpId = helpId
+        sourceRef.helpId = resolvedHelpId(fallbackURL: link)
+        AppLog.debug("DIR", "〔\(source.name)〕helpId=\(sourceRef.helpId.isEmpty ? "空" : sourceRef.helpId.prefix(20))")
 
         var chapters: [Chapter] = []
         // 爱阅语义：sourceDetail.url 为空 = 直接请求目录链接（link）。
@@ -185,7 +186,7 @@ final class IBSEngine {
                 AppLog.warn("DIR", "〔\(source.name)〕无_list规则")
                 break
             }
-            let runner = RuleRunner(ctx: makeContext(step: step))
+            let runner = RuleRunner(ctx: makeContext(step: step, sourceRef: sourceRef))
 
             // 双模式列表（与 search 一致）：@json: 路径 → JSON 数组项；否则 HTML DOM 选择器
             var entries: [(input: String, node: HTMLNode?)] = []
@@ -218,7 +219,7 @@ final class IBSEngine {
 
             // 下一页（nextPageUrl 脚本读取 helpId 存入的 next0 / next1）
             if let nextRule = node.nextPageUrl?.first, !nextRule.isEmpty {
-                let ctx = makeContext(step: step)
+                let ctx = makeContext(step: step, sourceRef: sourceRef)
                 let next: String?
                 if nextRule.hasPrefix("@dyn:") {
                     next = DynEngine(ctx: ctx).executeString(String(nextRule.dropFirst(5)))
@@ -242,33 +243,52 @@ final class IBSEngine {
 
     // MARK: - 正文
 
-    func content(chapter: Chapter) async throws -> String {
+    /// 上一次 content() 是否只拿到「整页兜底」产物（不可信，调用方不应写入章节缓存）。
+    private(set) var lastContentUsedFallback = false
+
+    /// - Parameter detailURL: 书籍详情/目录地址（helpId 为空时的兜底来源：`id=1784836`）。
+    func content(chapter: Chapter, detailURL: String = "") async throws -> String {
+        lastContentUsedFallback = false
         guard let node = source.chapterDetail else {
             AppLog.warn("CONTENT", "〔\(source.name)〕无chapterDetail节点，正文将为空")
             return ""
         }
         var sourceRef = DynSourceRef(configName: source.name)
         sourceRef.chapterURL = chapter.url
-        sourceRef.helpId = helpId
+        sourceRef.detailURL = detailURL
+        sourceRef.helpId = resolvedHelpId(fallbackURL: detailURL)
+        if helpId.isEmpty && !sourceRef.helpId.isEmpty {
+            helpId = sourceRef.helpId
+            AppLog.warn("CONTENT", "〔\(source.name)〕helpId缺失，已从详情URL兜底解析：\(sourceRef.helpId)")
+        }
+        AppLog.debug("CONTENT", "〔\(source.name)〕helpId=\(sourceRef.helpId.isEmpty ? "空" : sourceRef.helpId.prefix(20)) 章节URL=\(chapter.url.prefix(80))")
 
         // 爱阅语义：chapterDetail.url 为空 = 直接请求章节URL（chapter.url）
         let step = try await runNode(node, overrideURL: chapter.url, keyword: nil, pageIndex: nil,
                                      parentFrames: [], sourceRef: sourceRef)
-        AppLog.debug("CONTENT", "〔\(source.name)〕章节页响应 \(step.text.count) 字符")
+        AppLog.debug("CONTENT", "〔\(source.name)〕章节页响应 \(step.text.count) 字符：\(step.text.prefix(120))")
 
         // 最深层 parser 的 content 字段（组合规则：@def: JS + @dyn: 提取 + @ex: 取文本）
         if let contentRules = fieldRules(step.parser, "content") {
-            let runner = RuleRunner(ctx: makeContext(step: step))
+            let runner = RuleRunner(ctx: makeContext(step: step, sourceRef: sourceRef))
             let dom = HTMLParser.parse(step.text)
             var text = runner.run(RuleValue.combo(contentRules), input: step.text, dom: dom)
-            // 智能兜底：组合规则含 @def: 且结果疑似 Base64 密文（JS解密链未生效）→
-            // 七猫模式原生解密（前16B=IV，AES-128-CBC，key需从@def提取失败则跳过）
-            if let t = text, Self.looksLikeBase64Cipher(t),
-               contentRules.contains(where: { $0.contains("@def:") && $0.contains("CryptoJS") }) {
-                AppLog.warn("CONTENT", "〔\(source.name)〕JS解密疑似未生效（结果仍为Base64密文），尝试原生兜底")
-                if let plain = Self.decryptQimaoStyle(cipherB64: t, script: contentRules.first(where: { $0.contains("@def:") }) ?? "") {
-                    text = plain
-                    AppLog.info("CONTENT", "〔\(source.name)〕原生兜底解密成功：\(plain.count)字")
+            // 智能兜底：@def: 携带 CryptoJS 的源（七猫形态）在 JS 解密链未生效时
+            // （结果为 nil / 空 / 仍是 Base64 密文）→ 走原生 AES-128-CBC 解密。
+            // 密文直接取响应里的 data.content，不依赖 JS 执行是否成功。
+            if let defScript = contentRules.first(where: { $0.contains("@def:") && $0.contains("CryptoJS") }) {
+                let produced = text ?? ""
+                if produced.isEmpty || Self.looksLikeBase64Cipher(produced) {
+                    let cipher = JSONRule.path("data.content", in: step.text).first ?? produced
+                    if Self.looksLikeBase64Cipher(cipher) {
+                        AppLog.warn("CONTENT", "〔\(source.name)〕JS解密链未生效（结果: \(produced.isEmpty ? "空" : "\(produced.count)字密文")），尝试原生AES兜底")
+                        if let plain = Self.decryptQimaoStyle(cipherB64: cipher, script: defScript) {
+                            text = plain
+                            AppLog.info("CONTENT", "〔\(source.name)〕原生兜底解密成功：\(plain.count)字")
+                        } else {
+                            AppLog.error("CONTENT", "〔\(source.name)〕原生兜底解密失败（key/填充不匹配）")
+                        }
+                    }
                 }
             }
             if let text, !text.isEmpty {
@@ -282,7 +302,7 @@ final class IBSEngine {
         }
         // 兜底：_range
         if let rangeRules = fieldRules(step.parser, "_range") {
-            let runner = RuleRunner(ctx: makeContext(step: step))
+            let runner = RuleRunner(ctx: makeContext(step: step, sourceRef: sourceRef))
             let dom = HTMLParser.parse(step.text)
             let text = runner.run(RuleValue.combo(rangeRules), input: step.text, dom: dom)
             if let text, !text.isEmpty {
@@ -291,9 +311,10 @@ final class IBSEngine {
                 return cleaned
             }
         }
-        // 最终兜底：整页转文本
+        // 最终兜底：整页转文本（多为接口错误 JSON，标记为不可信，不写缓存）
+        lastContentUsedFallback = true
         let fallback = Self.cleanContent(HTMLParser.htmlToText(step.text))
-        AppLog.warn("CONTENT", "〔\(source.name)〕整页兜底：\(fallback.count)字（content规则未命中时的产物）")
+        AppLog.warn("CONTENT", "〔\(source.name)〕整页兜底：\(fallback.count)字（content规则未命中，结果不写缓存）")
         return fallback
     }
 
@@ -401,7 +422,10 @@ final class IBSEngine {
         ctx.responseHeaders = headers
         let runner = RuleRunner(ctx: ctx)
         let dom: HTMLNode? = text.isEmpty ? nil : HTMLParser.parse(text)
-        for (_, field) in node.parser {
+        for (key, field) in node.parser {
+            // content/_range 是「取值」字段，由上层 content() 单独执行（那里带 detailURL/helpId）。
+            // 这里跳过可避免七猫同一章跑两遍 CryptoJS 解密（每章省一次 JSContext）。
+            if key == "content" || key == "_range" { continue }
             if case .rules(let rules) = field {
                 _ = runner.run(RuleValue.combo(rules), input: text, dom: dom)
             }
@@ -444,12 +468,20 @@ final class IBSEngine {
         return runner.run(RuleValue.combo(rules), input: input, dom: node)
     }
 
-    private func makeContext(step: StepResult) -> DynContext {
+    /// 字段/组合规则执行上下文。
+    /// ⚠️ 必须带上 sourceRef（尤其 helpId）：七猫正文 URL 由
+    /// `@dyn: bid=source.helpId; ...` 组合规则拼出，若这里只新建
+    /// `DynSourceRef(configName:)`，helpId 恒为空 → `id=` 空 → 服务端报错 →
+    /// `@json:data.content` 取空 → 正文空白（日志实锤场景）。
+    private func makeContext(step: StepResult, sourceRef: DynSourceRef? = nil) -> DynContext {
         let ctx = DynContext(store: store)
         ctx.respContent = step.text
         ctx.responseHeaders = step.headers
         ctx.parentChain = step.frames
-        ctx.source = DynSourceRef(configName: source.name)
+        var ref = sourceRef ?? DynSourceRef(configName: source.name)
+        if ref.configName.isEmpty { ref.configName = source.name }
+        if ref.helpId.isEmpty { ref.helpId = helpId }
+        ctx.source = ref
         return ctx
     }
 
@@ -602,7 +634,36 @@ final class IBSEngine {
         return result
     }
 
+    // MARK: - helpId 兜底
+
+    /// 取当前 helpId；为空时从兜底 URL 的查询参数里解析（旧书数据 helpId 缺失的兼容路径）。
+    func resolvedHelpId(fallbackURL: String = "") -> String {
+        if !helpId.isEmpty { return helpId }
+        return Self.helpIdFromURL(fallbackURL)
+    }
+
+    /// 从 URL 查询串中提取书籍 id（`...chapter-list?id=1784836&sign=...` → "1784836"）。
+    static func helpIdFromURL(_ url: String) -> String {
+        guard !url.isEmpty, let mark = url.firstIndex(of: "?") else { return "" }
+        let query = url[url.index(after: mark)...]
+        for pair in query.split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard kv.count == 2, kv[0].lowercased() == "id" else { continue }
+            let value = String(kv[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { return value }
+        }
+        return ""
+    }
+
     // MARK: - 工具
+
+    /// 疑似接口错误 JSON 被当成正文（`{"code":...,"message":...}` 形态）。
+    /// 旧版本把这类「整页兜底」结果写进了章节缓存，需要识别后丢弃重取。
+    static func looksLikeAPIErrorPayload(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.hasPrefix("{"), t.count < 400, !t.contains("\n\n") else { return false }
+        return t.contains("\"code\"") || t.contains("\"message\"") || t.contains("\"msg\"")
+    }
 
     /// 疑似 Base64 密文（长度>100、纯Base64字符集、无中文）。
     static func looksLikeBase64Cipher(_ text: String) -> Bool {

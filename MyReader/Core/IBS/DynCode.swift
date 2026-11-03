@@ -603,7 +603,9 @@ final class DynEngine {
             case "evaluateScript":
                 let code = arg0?.stringValue ?? ""
                 let value = js.evaluateScript(code)
-                if let e = js.objectForKeyedSubscript("__jsError__"), !e.isNull {
+                // __jsError__ 未声明时 objectForKeyedSubscript 返回 undefined（非 null），
+                // 只判断 isNull 会把正常脚本误报成「JS执行异常: undefined」（日志实锤噪音）。
+                if let e = js.objectForKeyedSubscript("__jsError__"), !e.isNull, !e.isUndefined {
                     AppLog.error("JS", "JS执行异常: \(e.toString() ?? "?")")
                 }
                 guard let value = value else {

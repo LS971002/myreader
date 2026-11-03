@@ -118,7 +118,14 @@ final class ReaderModel: ObservableObject {
 
     func chapterText(_ index: Int) async -> String {
         if let cached = Paths.readChapter(bookID: bookID, index: index), !cached.isEmpty {
-            return cached
+            // 旧版本曾把接口错误 JSON（正文规则未命中时的整页兜底）写进缓存，
+            // 识别后丢弃重取，避免修好解析仍显示 115 字的错误内容。
+            if IBSEngine.looksLikeAPIErrorPayload(cached) {
+                AppLog.warn("READER", "章节[\(index)]缓存为接口错误响应（\(cached.count)字），已丢弃重取")
+                Paths.removeChapter(bookID: bookID, index: index)
+            } else {
+                return cached
+            }
         }
         guard book.origin == .online else { return "" }
         guard let sourceID = book.sourceID,
@@ -126,16 +133,28 @@ final class ReaderModel: ObservableObject {
               book.chapters.indices.contains(index) else {
             return ""
         }
+        // 旧版本目录 URL 里 helpId 为空（`...?id=&chapterId=...`）→ 正文接口必报参数错误，
+        // 首次取正文时重建一次目录（同源同书，章节顺序不变）。
+        await refreshDirectoryIfStale()
+        guard book.chapters.indices.contains(index) else { return "" }
+
         let chapter = book.chapters[index]
         let engine = IBSEngine(source: source)
-        engine.helpId = book.helpId
+        // helpId 为空（旧书数据）时由引擎从 detailURL 的 id= 参数兜底解析。
+        engine.helpId = book.helpId.isEmpty
+            ? IBSEngine.helpIdFromURL(book.detailURL) : book.helpId
+        if book.helpId.isEmpty && !engine.helpId.isEmpty {
+            AppLog.warn("READER", "书籍helpId为空，已从详情URL兜底解析：\(engine.helpId)")
+        }
         do {
-            AppLog.debug("READER", "取章节[\(index)] \(chapter.title.prefix(20))（源:\(source.name)）")
-            let text = try await engine.content(chapter: chapter)
-            if !text.isEmpty {
+            AppLog.debug("READER", "取章节[\(index)] \(chapter.title.prefix(20))（源:\(source.name)，helpId:\(engine.helpId.isEmpty ? "空" : engine.helpId)）")
+            let text = try await engine.content(chapter: chapter, detailURL: book.detailURL)
+            if !text.isEmpty && !engine.lastContentUsedFallback {
                 Paths.writeChapter(text, bookID: bookID, index: index)
-            } else {
+            } else if text.isEmpty {
                 AppLog.warn("READER", "章节[\(index)]内容为空")
+            } else {
+                AppLog.warn("READER", "章节[\(index)]仅拿到兜底内容（\(text.count)字），不写缓存")
             }
             return text
         } catch {
@@ -143,6 +162,30 @@ final class ReaderModel: ObservableObject {
             errorMessage = error.localizedDescription
             return ""
         }
+    }
+
+    // MARK: - 目录自愈
+
+    private var directoryChecked = false
+
+    /// 旧版本 helpId 未注入时目录URL是 `...?id=&chapterId=...`（sign 也随之算错），
+    /// 正文接口只会返回参数错误。首次取正文时自动重建一次目录。
+    private func refreshDirectoryIfStale() async {
+        guard !directoryChecked, book.origin == .online else { return }
+        directoryChecked = true
+        let stale = book.chapters.contains {
+            $0.url.contains("id=&") || $0.url.hasSuffix("id=")
+        }
+        guard stale else { return }
+        AppLog.warn("READER", "《\(book.name.prefix(16))》旧目录URL缺少id参数，自动重建目录")
+        guard let updated = try? await BookActions.refreshDirectory(book: book, store: store),
+              !updated.chapters.isEmpty else {
+            AppLog.error("READER", "目录重建失败，正文可能继续为空")
+            return
+        }
+        book = updated
+        pageCache.removeAll()
+        AppLog.info("READER", "目录已重建：\(updated.chapters.count)章（第\(updated.currentChapter + 1)章）")
     }
 
     private func prefetchAround(_ index: Int) {
@@ -153,7 +196,8 @@ final class ReaderModel: ObservableObject {
             for offset in 1...max(1, count) {
                 let target = index + offset
                 guard self.book.chapters.indices.contains(target) else { break }
-                if Paths.readChapter(bookID: self.bookID, index: target) != nil { continue }
+                if let cached = Paths.readChapter(bookID: self.bookID, index: target),
+                   !IBSEngine.looksLikeAPIErrorPayload(cached) { continue }
                 _ = await self.chapterText(target)
             }
         }

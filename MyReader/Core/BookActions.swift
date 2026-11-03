@@ -14,10 +14,12 @@ enum BookActions {
         book.sourceID = source.id
         book.sourceName = source.name
         book.detailURL = result.link
-        book.helpId = result.helpId
+        // helpId 提取失败时从详情地址的 id= 参数兜底（否则正文组合规则拼出 `id=` 空）
+        book.helpId = result.helpId.isEmpty
+            ? IBSEngine.helpIdFromURL(result.link) : result.helpId
 
         let engine = IBSEngine(source: source)
-        engine.helpId = result.helpId
+        engine.helpId = book.helpId
         // 目录
         if let chapters = try? await engine.directory(link: result.link) {
             book.chapters = chapters
@@ -69,6 +71,14 @@ enum BookActions {
         }
         var updated = book
         let engine = IBSEngine(source: source)
+        // 目录/正文组合规则（七猫 `bid=source.helpId`）依赖书籍级 helpId，必须带上。
+        let helpId = book.helpId.isEmpty
+            ? IBSEngine.helpIdFromURL(book.detailURL) : book.helpId
+        engine.helpId = helpId
+        if book.helpId.isEmpty && !helpId.isEmpty {
+            updated.helpId = helpId
+            AppLog.warn("ADD", "《\(book.name.prefix(16))》helpId为空，已从详情URL补全：\(helpId)")
+        }
         let chapters = try await engine.directory(link: book.detailURL)
         if !chapters.isEmpty {
             // 按磁盘缓存标记
@@ -102,8 +112,9 @@ enum BookActions {
             throw BookSourceEngineError.missingSource
         }
         updated.detailURL = match.link
-        updated.helpId = match.helpId
-        engine.helpId = match.helpId
+        updated.helpId = match.helpId.isEmpty
+            ? IBSEngine.helpIdFromURL(match.link) : match.helpId
+        engine.helpId = updated.helpId
         let chapters = try await engine.directory(link: match.link)
         guard !chapters.isEmpty else {
             AppLog.error("SOURCE", "换源失败：新源目录解析0章（detailURL=\(match.link.prefix(60))）")
